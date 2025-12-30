@@ -1144,11 +1144,15 @@ Genereer een GEDETAILLEERD JSON-antwoord:
         // Get best LinkedIn data
         const bestMatch = linkedinInfo.bestMatch;
 
-        // Use thumbnail from best match if available - strictly from search results only
-        const profilePhotoUrl = bestMatch?.thumbnail || null;
-
-
-
+        // Use thumbnail from best match if available, otherwise try image search
+        let profilePhotoUrl = bestMatch?.thumbnail || null;
+        if (!profilePhotoUrl && bestMatch?.url) {
+            console.log(`🖼️ No thumbnail in search results, trying image search for ${guest.full_name}`);
+            profilePhotoUrl = await this.findProfilePhoto(guest, bestMatch.url);
+        } else if (!profilePhotoUrl) {
+            console.log(`🖼️ No LinkedIn match, trying general image search for ${guest.full_name}`);
+            profilePhotoUrl = await this.findProfilePhoto(guest);
+        }
 
         // Calculate total followers for VIP scoring
         const totalFollowers = (instagramResult.followers || 0) + (twitterResult.followers || 0);

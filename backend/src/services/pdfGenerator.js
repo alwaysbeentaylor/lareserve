@@ -1,8 +1,10 @@
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 /**
  * PDF Generator Service
  * Generates professional PDF reports for guests
+ * Uses @sparticuz/chromium for serverless compatibility
  */
 
 class PDFGenerator {
@@ -13,12 +15,15 @@ class PDFGenerator {
   async getBrowser() {
     if (!this.browser) {
       this.browser = await puppeteer.launch({
-        headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
       });
     }
     return this.browser;
   }
+
 
   /**
    * Generate PDF for a single guest
