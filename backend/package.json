@@ -20,8 +20,8 @@
     "express": "^5.2.1",
     "multer": "^2.0.2",
     "openai": "^6.15.0",
+    "pdfkit": "^0.17.2",
     "puppeteer": "^24.34.0",
     "xlsx": "^0.18.5"
-  },
-  "devDependencies": {}
+  }
 }

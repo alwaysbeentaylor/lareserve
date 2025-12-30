@@ -1,827 +1,369 @@
-const puppeteer = require('puppeteer');
+const PDFDocument = require('pdfkit');
 
 /**
- * PDF Generator Service
- * Generates professional PDF reports for guests
+ * PDF Generator Service using PDFKit
+ * Generates professional PDF reports for guests without requiring a browser
  */
 
 class PDFGenerator {
   constructor() {
-    this.browser = null;
+    this.primaryColor = '#1a365d';
+    this.accentColor = '#c9a227';
+    this.textColor = '#2d3748';
+    this.lightGray = '#718096';
   }
 
-  async getBrowser() {
-    if (!this.browser) {
-      this.browser = await puppeteer.launch({
-        headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
-    }
-    return this.browser;
-  }
-
-  /**
-   * Generate PDF for a single guest
-   */
+  // Generate PDF for a single guest
   async generateGuestReport({ guest, research, reservations, suggestions }) {
-    const html = this.buildGuestReportHTML(guest, research, reservations, suggestions);
-    return this.generatePDF(html);
+    return new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        const chunks = [];
+
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+
+        this.addHeader(doc, 'Gastprofiel');
+        this.addGuestInfo(doc, guest, research);
+
+        if (research) {
+          this.addResearchSection(doc, research);
+        }
+
+        if (reservations && reservations.length > 0) {
+          this.addReservationsSection(doc, reservations);
+        }
+
+        doc.end();
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
-  /**
-   * Generate bulk PDF for multiple guests (import batch)
-   */
+  // Generate bulk PDF for multiple guests (import batch)
   async generateBulkReport(guests, batchId) {
-    const html = this.buildBulkReportHTML(guests, batchId);
-    return this.generatePDF(html);
+    return this.generateDailyReport(guests, batchId);
   }
 
-  /**
-   * Generate daily arrival report
-   */
+  // Generate daily arrival report
   async generateDailyReport(guests, date) {
-    const html = this.buildDailyReportHTML(guests, date);
-    return this.generatePDF(html);
-  }
+    return new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ margin: 40, size: 'A4' });
+        const chunks = [];
 
-  async generatePDF(html) {
-    const browser = await this.getBrowser();
-    const page = await browser.newPage();
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
 
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+        // Header
+        this.addHeader(doc, `VIP Gastenoverzicht`);
 
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      margin: { top: '20mm', right: '15mm', bottom: '20mm', left: '15mm' },
-      printBackground: true
-    });
+        doc.fontSize(12)
+          .fillColor(this.lightGray)
+          .text(`Datum: ${date}`, 40, 90)
+          .text(`Aantal gasten: ${guests.length}`, 40, 105);
 
-    await page.close();
-    return pdfBuffer;
-  }
+        doc.moveDown(2);
 
-  getStyles() {
-    return `
-      <style>
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap');
-        
-        * {
-          margin: 0;
-          padding: 0;
-          box-sizing: border-box;
-        }
-        
-        body {
-          font-family: 'Inter', sans-serif;
-          font-size: 11px;
-          line-height: 1.5;
-          color: #1a1a1a;
-          background: #fff;
-        }
-        
-        .header {
-          text-align: center;
-          padding-bottom: 20px;
-          margin-bottom: 20px;
-          border-bottom: 2px solid #B8860B;
-        }
-        
-        .header h1 {
-          font-family: 'Playfair Display', serif;
-          font-size: 28px;
-          font-weight: 600;
-          color: #1a1a1a;
-          letter-spacing: 2px;
-        }
-        
-        .header .subtitle {
-          color: #B8860B;
-          font-size: 12px;
-          margin-top: 5px;
-          text-transform: uppercase;
-          letter-spacing: 1px;
-        }
-        
-        .header .date {
-          color: #666;
-          font-size: 11px;
-          margin-top: 10px;
-        }
-        
-        .guest-card {
-          background: #fafafa;
-          border: 1px solid #e5e7eb;
-          border-radius: 8px;
-          padding: 20px;
-          margin-bottom: 20px;
-          page-break-inside: avoid;
-        }
-        
-        .guest-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          margin-bottom: 15px;
-        }
-        
-        .guest-name {
-          font-family: 'Playfair Display', serif;
-          font-size: 20px;
-          font-weight: 600;
-          color: #1a1a1a;
-        }
-        
-        .vip-badge {
-          background: linear-gradient(135deg, #B8860B, #DAA520);
-          color: white;
-          padding: 5px 15px;
-          border-radius: 20px;
-          font-weight: 600;
-          font-size: 12px;
-        }
-        
-        .vip-score {
-          display: flex;
-          align-items: center;
-          gap: 5px;
-        }
-        
-        .vip-score .score {
-          font-size: 24px;
-          font-weight: 700;
-          color: #B8860B;
-        }
-        
-        .vip-score .label {
-          font-size: 10px;
-          color: #666;
-        }
-        
-        .info-grid {
-          display: grid;
-          grid-template-columns: repeat(2, 1fr);
-          gap: 10px;
-          margin-bottom: 15px;
-        }
-        
-        .info-item {
-          display: flex;
-          flex-direction: column;
-        }
-        
-        .info-label {
-          font-size: 9px;
-          color: #666;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          margin-bottom: 2px;
-        }
-        
-        .info-value {
-          font-size: 12px;
-          color: #1a1a1a;
-        }
-        
-        .section {
-          margin-top: 15px;
-          padding-top: 15px;
-          border-top: 1px solid #e5e7eb;
-        }
-        
-        .section-title {
-          font-size: 11px;
-          font-weight: 600;
-          color: #B8860B;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          margin-bottom: 10px;
-        }
-        
-        .notable-info {
-          background: #fff;
-          border-left: 3px solid #B8860B;
-          padding: 10px 15px;
-          font-size: 11px;
-          color: #444;
-        }
-        
-        .link {
-          color: #B8860B;
-          text-decoration: none;
-        }
-        
-        .footer {
-          text-align: center;
-          padding-top: 20px;
-          margin-top: 30px;
-          border-top: 1px solid #e5e7eb;
-          color: #666;
-          font-size: 9px;
-        }
-        
-        .summary-stats {
-          display: grid;
-          grid-template-columns: repeat(4, 1fr);
-          gap: 15px;
-          margin-bottom: 30px;
-        }
-        
-        .stat-box {
-          background: #fafafa;
-          border: 1px solid #e5e7eb;
-          border-radius: 8px;
-          padding: 15px;
-          text-align: center;
-        }
-        
-        .stat-value {
-          font-size: 28px;
-          font-weight: 700;
-          color: #B8860B;
-        }
-        
-        .stat-label {
-          font-size: 10px;
-          color: #666;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
+        // Summary table
+        this.addSummaryTable(doc, guests);
 
-        .page-break {
-          page-break-after: always;
-        }
+        // Individual guest profiles
+        for (let i = 0; i < guests.length; i++) {
+          const guest = guests[i];
 
-        .profile-photo {
-          width: 60px;
-          height: 60px;
-          border-radius: 50%;
-          object-fit: cover;
-          border: 2px solid #B8860B;
-          margin-right: 15px;
-        }
-
-        .profile-photo-small {
-          width: 40px;
-          height: 40px;
-          border-radius: 50%;
-          object-fit: cover;
-          border: 1px solid #B8860B;
-          margin-right: 10px;
-        }
-
-        .header-content {
-          display: flex;
-          align-items: center;
-        }
-
-        /* Management Summary Table Styles */
-        .summary-table {
-          width: 100%;
-          border-collapse: collapse;
-          margin-bottom: 30px;
-          font-size: 10px;
-          background: #fff;
-          border: 1px solid #e5e7eb;
-          border-radius: 8px;
-          overflow: hidden;
-        }
-        
-        .summary-table th {
-          background: #f8f9fa;
-          padding: 10px;
-          text-align: left;
-          font-weight: 600;
-          color: #666;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          border-bottom: 2px solid #B8860B;
-        }
-        
-        .summary-table td {
-          padding: 8px 10px;
-          border-bottom: 1px solid #f0f0f0;
-          vertical-align: middle;
-        }
-        
-        .summary-table tr:last-child td {
-          border-bottom: none;
-        }
-        
-        .summary-table tr:hover {
-          background: #fffcf5;
-        }
-
-        .jump-link {
-          color: #1a1a1a;
-          text-decoration: none;
-          font-weight: 600;
-        }
-        
-        .jump-link:hover {
-          color: #B8860B;
-          text-decoration: underline;
-        }
-
-        .badge-score {
-          display: inline-block;
-          padding: 2px 8px;
-          border-radius: 12px;
-          font-weight: 700;
-          font-size: 10px;
-          text-align: center;
-          min-width: 40px;
-        }
-
-        .score-gold { background: #FEF3C7; color: #92400E; border: 1px solid #F59E0B; }
-        .score-silver { background: #F3F4F6; color: #374151; border: 1px solid #9CA3AF; }
-        .score-bronze { background: #FFF7ED; color: #9A3412; border: 1px solid #EA580C; }
-
-        .returning-icon {
-          color: #B8860B;
-          font-size: 12px;
-          margin-left: 5px;
-        }
-
-        .social-link-small {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          width: 20px;
-          height: 20px;
-          background: #0077B5;
-          color: white;
-          border-radius: 4px;
-          text-decoration: none;
-          font-size: 10px;
-          font-weight: bold;
-        }
-
-        .one-line-summary {
-          font-style: italic;
-          color: #666;
-          max-width: 250px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-      </style>
-    `;
-  }
-
-  buildGuestReportHTML(guest, research, reservations, suggestions) {
-    const vipScore = research?.vip_score || 5;
-    const influenceLevel = research?.influence_level || 'Gemiddeld';
-
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        ${this.getStyles()}
-      </head>
-      <body>
-        <div class="header">
-          <h1>VIP GASTPROFIEL</h1>
-          <div class="subtitle">Vertrouwelijk Onderzoeksrapport</div>
-          <div class="date">Gegenereerd op ${new Date().toLocaleDateString('nl-NL', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    })}</div>
-        </div>
-
-        <div class="guest-card">
-          <div class="guest-header">
-            <div class="header-content">
-              ${research?.profile_photo_url ? `<img src="${research.profile_photo_url}" class="profile-photo">` : ''}
-              <div>
-                <div class="guest-name">${guest.full_name}</div>
-                ${guest.company ? `<div style="color: #666; margin-top: 5px;">${guest.company}</div>` : ''}
-              </div>
-            </div>
-            <div class="vip-score">
-              <span class="score">${vipScore}</span>
-              <span class="label">/10<br>${influenceLevel}</span>
-            </div>
-          </div>
-
-          <div class="info-grid">
-            <div class="info-item">
-              <span class="info-label">E-mail</span>
-              <span class="info-value">${guest.email || 'Niet beschikbaar'}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Telefoon</span>
-              <span class="info-value">${guest.phone || 'Niet beschikbaar'}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Land</span>
-              <span class="info-value">${guest.country || 'Niet beschikbaar'}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">Totaal Verblijven</span>
-              <span class="info-value">${guest.total_stays || 1}</span>
-            </div>
-          </div>
-
-          ${research ? `
-            <div class="section">
-              <div class="section-title">Professionele Achtergrond</div>
-              <div class="info-grid">
-                <div class="info-item">
-                  <span class="info-label">Functie</span>
-                  <span class="info-value">${research.job_title || 'Niet gevonden'}</span>
-                </div>
-                <div class="info-item">
-                  <span class="info-label">Bedrijf</span>
-                  <span class="info-value">${research.company_name || guest.company || 'Niet gevonden'}</span>
-                </div>
-                <div class="info-item">
-                  <span class="info-label">Industrie</span>
-                  <span class="info-value">${research.industry || 'Niet gevonden'}</span>
-                </div>
-                <div class="info-item">
-                  <span class="info-label">LinkedIn</span>
-                  <span class="info-value">${research.linkedin_url ?
-          `<a class="link" href="${research.linkedin_url}">Bekijk Profiel</a>` :
-          'Niet gevonden'}</span>
-                </div>
-              </div>
-            </div>
-
-            ${(() => {
-          let fullReport = null;
-          try {
-            fullReport = typeof research.full_report === 'string'
-              ? JSON.parse(research.full_report)
-              : research.full_report;
-          } catch (e) { }
-
-          if (!fullReport) return research.notable_info ? `
-                  <div class="section">
-                    <div class="section-title">Opmerkelijke Informatie</div>
-                    <div class="notable-info">${research.notable_info}</div>
-                  </div>
-                ` : '';
-
-          return `
-                  <div class="section">
-                    <div class="section-title">Executive Summary</div>
-                    <div class="notable-info" style="border-left-color: #B8860B; background: #fffaf0;">
-                      ${fullReport.executive_summary}
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="section-title">Gedetailleerde Analyse</div>
-                    <div class="info-grid">
-                      <div class="info-item">
-                        <span class="info-label">Carrièrepad</span>
-                        <span class="info-value">${fullReport.professional_background?.career_trajectory || '-'}</span>
-                      </div>
-                      <div class="info-item">
-                        <span class="info-label">Expertise</span>
-                        <span class="info-value">${fullReport.professional_background?.industry_expertise || '-'}</span>
-                      </div>
-                    </div>
-                    <div style="margin-top: 10px;">
-                      <span class="info-label">Bedrijfsanalyse</span>
-                      <div class="info-value">${fullReport.company_analysis?.company_description || '-'}</div>
-                      <div style="font-size: 10px; color: #666; margin-top: 3px;">
-                        Marktpositie: ${fullReport.company_analysis?.company_position || '-'}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="section" style="background: #fdfaf0; padding: 15px; border-radius: 5px; margin-top: 15px;">
-                    <div class="section-title">Service Aanbevelingen</div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                      <div>
-                        <div class="info-label">Prioriteit & Aandacht</div>
-                        <div class="info-value"><strong>${fullReport.service_recommendations?.priority_level}</strong></div>
-                        <div style="font-size: 10px; margin-top: 5px;">${fullReport.service_recommendations?.special_attention}</div>
-                      </div>
-                      <div>
-                        <div class="info-label">Interesses & Stijl</div>
-                        <div style="font-size: 10px;">${fullReport.service_recommendations?.potential_interests}</div>
-                        <div style="font-size: 10px; margin-top: 5px;">Communicatie: ${fullReport.service_recommendations?.communication_style}</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="section-title">VIP Indicatoren</div>
-                    <div style="font-size: 10px; color: #444;">
-                      <p>• ${fullReport.vip_indicators?.wealth_signals}</p>
-                      <p>• ${fullReport.vip_indicators?.influence_factors}</p>
-                      <p>• ${fullReport.vip_indicators?.status_markers}</p>
-                    </div>
-                  </div>
-                `;
-        })()}
-          ` : `
-            <div class="section">
-              <div class="section-title">Onderzoek Status</div>
-              <p style="color: #666;">Onderzoek nog niet uitgevoerd voor deze gast.</p>
-            </div>
-          `}
-
-          ${reservations && reservations.length > 0 ? `
-            <div class="section">
-              <div class="section-title">Recente Reserveringen</div>
-              <table style="width: 100%; font-size: 10px;">
-                <thead>
-                  <tr style="text-align: left; color: #666;">
-                    <th style="padding: 5px 0;">Check-in</th>
-                    <th style="padding: 5px 0;">Check-out</th>
-                    <th style="padding: 5px 0;">Kamer</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${reservations.slice(0, 5).map(r => `
-                    <tr>
-                      <td style="padding: 3px 0;">${r.check_in_date || '-'}</td>
-                      <td style="padding: 3px 0;">${r.check_out_date || '-'}</td>
-                      <td style="padding: 3px 0;">${r.room_number || '-'}</td>
-                    </tr>
-                  `).join('')}
-                </tbody>
-              </table>
-            </div>
-          ` : ''}
-        </div>
-
-        <div class="footer">
-          Dit rapport is automatisch gegenereerd door het VIP Guest Research Tool.
-          Alleen bestemd voor intern gebruik.
-        </div>
-      </body>
-      </html>
-    `;
-  }
-
-  buildBulkReportHTML(guests, batchId) {
-    const totalGuests = guests.length;
-    const vipCount = guests.filter(g => g.vip_score >= 7).length;
-    const researchedCount = guests.filter(g => g.vip_score).length;
-
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        ${this.getStyles()}
-      </head>
-      <body>
-        <div class="header">
-          <h1>VIP OVERZICHTSRAPPORT</h1>
-          <div class="subtitle">Import Batch Samenvatting</div>
-          <div class="date">Gegenereerd op ${new Date().toLocaleDateString('nl-NL', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    })}</div>
-        </div>
-
-        <div class="summary-stats">
-          <div class="stat-box">
-            <div class="stat-value">${totalGuests}</div>
-            <div class="stat-label">Totaal Gasten</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-value">${vipCount}</div>
-            <div class="stat-label">VIP Gasten</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-value">${researchedCount}</div>
-            <div class="stat-label">Onderzocht</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-value">${totalGuests - researchedCount}</div>
-            <div class="stat-label">In Afwachting</div>
-          </div>
-        </div>
-
-        ${this.buildManagementSummaryTable(guests)}
-
-        <div class="page-break"></div>
-
-        ${guests.map((guest, index) => `
-          <div id="guest-${guest.id}" class="guest-card">
-            <div class="guest-header">
-              <div class="header-content">
-                ${guest.profile_photo_url ? `<img src="${guest.profile_photo_url}" class="profile-photo-small">` : ''}
-                <div>
-                  <div class="guest-name">${guest.full_name}</div>
-                  ${guest.company || guest.research_company ?
-        `<div style="color: #666; margin-top: 3px;">${guest.research_company || guest.company}</div>` : ''}
-                </div>
-              </div>
-              ${guest.vip_score ? `
-                <div class="vip-badge">${guest.vip_score}/10 - ${guest.influence_level || 'Score'}</div>
-              ` : '<div style="color: #999; font-size: 10px;">Niet onderzocht</div>'}
-            </div>
-            <div class="info-grid">
-              <div class="info-item">
-                <span class="info-label">Functie</span>
-                <span class="info-value">${guest.job_title || '-'}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Land</span>
-                <span class="info-value">${guest.country || '-'}</span>
-              </div>
-            </div>
-            ${(() => {
-        let summary = guest.notable_info || '';
-        if (guest.full_report) {
-          try {
-            const fr = typeof guest.full_report === 'string' ? JSON.parse(guest.full_report) : guest.full_report;
-            if (fr && fr.executive_summary) summary = fr.executive_summary;
-          } catch (e) { }
-        }
-        return summary ? `
-                  <div class="notable-info" style="font-size: 10px; margin-top: 10px;">
-                    ${summary.substring(0, 300)}${summary.length > 300 ? '...' : ''}
-                  </div>
-                ` : '';
-      })()}
-          </div>
-        `).join('')}
-
-        <div class="footer">
-          Dit rapport is automatisch gegenereerd door het VIP Guest Research Tool.
-          Batch ID: ${batchId}
-        </div>
-      </body>
-      </html>
-    `;
-  }
-
-  buildManagementSummaryTable(guests) {
-    return `
-      <div class="section-title">Management Overzicht (Snelmenu)</div>
-      <table class="summary-table">
-        <thead>
-          <tr>
-            <th>Gast Naam</th>
-            <th>Kamer</th>
-            <th>VIP</th>
-            <th>Functie & Bedrijf</th>
-            <th>Highlights</th>
-            <th>Social</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${guests.map(guest => {
-      const score = guest.vip_score || 0;
-      let scoreClass = 'score-silver';
-      if (score >= 8) scoreClass = 'score-gold';
-      else if (score < 5 && score > 0) scoreClass = 'score-bronze';
-
-      let shortSummary = '';
-      if (guest.full_report) {
-        try {
-          const fr = typeof guest.full_report === 'string' ? JSON.parse(guest.full_report) : guest.full_report;
-          if (fr && fr.executive_summary) {
-            shortSummary = fr.executive_summary.split('.')[0] + '.';
+          // Add page break if needed
+          if (doc.y > 650) {
+            doc.addPage();
           }
-        } catch (e) { }
-      }
-      if (!shortSummary && guest.notable_info) {
-        shortSummary = guest.notable_info.substring(0, 60) + '...';
-      }
 
-      return `
-              <tr>
-                <td>
-                  <a href="#guest-${guest.id}" class="jump-link">${guest.full_name}</a>
-                  ${guest.total_stays > 1 ? '<span class="returning-icon" title="Terugkerende gast">🔄</span>' : ''}
-                </td>
-                <td><strong>${guest.room_number || 'TBD'}</strong></td>
-                <td><span class="badge-score ${scoreClass}">${score || '-'}</span></td>
-                <td>
-                  <div style="font-weight:500;">${guest.job_title || '-'}</div>
-                  <div style="color: #666; font-size: 9px;">${guest.research_company || guest.company || '-'}</div>
-                </td>
-                <td><div class="one-line-summary">${shortSummary || '-'}</div></td>
-                <td>
-                  ${guest.linkedin_url ? `<a href="${guest.linkedin_url}" class="social-link-small">in</a>` : '-'}
-                </td>
-              </tr>
-            `;
-    }).join('')}
-        </tbody>
-      </table>
-    `;
+          this.addGuestCard(doc, guest, i + 1);
+        }
+
+        // Footer on last page
+        doc.fontSize(8)
+          .fillColor(this.lightGray)
+          .text(
+            `Gegenereerd op ${new Date().toLocaleDateString('nl-NL')} om ${new Date().toLocaleTimeString('nl-NL')}`,
+            40,
+            doc.page.height - 50,
+            { align: 'center' }
+          );
+
+        doc.end();
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
-  buildDailyReportHTML(guests, date) {
-    const formattedDate = new Date(date).toLocaleDateString('nl-NL', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
+  addHeader(doc, title) {
+    // Gold accent bar
+    doc.rect(0, 0, doc.page.width, 8)
+      .fill(this.accentColor);
+
+    // Title
+    doc.fontSize(24)
+      .fillColor(this.primaryColor)
+      .font('Helvetica-Bold')
+      .text(title, 40, 30);
+
+    // Subtitle
+    doc.fontSize(10)
+      .fillColor(this.lightGray)
+      .font('Helvetica')
+      .text('La Réserve - VIP Research Tool', 40, 60);
+  }
+
+  addGuestInfo(doc, guest, research) {
+    const y = 130;
+
+    doc.fontSize(16)
+      .fillColor(this.primaryColor)
+      .font('Helvetica-Bold')
+      .text(guest.full_name || 'Onbekende gast', 40, y);
+
+    let infoY = y + 25;
+
+    if (research?.job_title) {
+      doc.fontSize(11)
+        .fillColor(this.textColor)
+        .font('Helvetica')
+        .text(research.job_title, 40, infoY);
+      infoY += 18;
+    }
+
+    if (research?.research_company || guest.company) {
+      doc.fontSize(10)
+        .fillColor(this.lightGray)
+        .text(research?.research_company || guest.company, 40, infoY);
+      infoY += 18;
+    }
+
+    if (guest.country) {
+      doc.fontSize(10)
+        .fillColor(this.lightGray)
+        .text(`📍 ${guest.country}`, 40, infoY);
+      infoY += 18;
+    }
+
+    // VIP Score badge
+    if (research?.vip_score) {
+      const score = research.vip_score;
+      const badgeColor = score >= 8 ? '#48bb78' : score >= 5 ? '#ecc94b' : '#fc8181';
+
+      doc.rect(doc.page.width - 100, y, 60, 30)
+        .fill(badgeColor);
+
+      doc.fontSize(16)
+        .fillColor('#ffffff')
+        .font('Helvetica-Bold')
+        .text(`${score}/10`, doc.page.width - 95, y + 8);
+    }
+
+    doc.moveDown(2);
+  }
+
+  addResearchSection(doc, research) {
+    const startY = doc.y + 20;
+
+    doc.fontSize(14)
+      .fillColor(this.primaryColor)
+      .font('Helvetica-Bold')
+      .text('Onderzoeksresultaten', 40, startY);
+
+    let y = startY + 25;
+
+    // Industry
+    if (research.industry) {
+      y = this.addInfoRow(doc, 'Industrie', research.industry, y);
+    }
+
+    // Influence level
+    if (research.influence_level) {
+      y = this.addInfoRow(doc, 'Invloedsniveau', research.influence_level, y);
+    }
+
+    // LinkedIn
+    if (research.linkedin_url) {
+      y = this.addInfoRow(doc, 'LinkedIn', research.linkedin_url, y);
+    }
+
+    // Notable info
+    if (research.notable_info) {
+      doc.fontSize(12)
+        .fillColor(this.primaryColor)
+        .font('Helvetica-Bold')
+        .text('Opmerkelijke informatie:', 40, y + 10);
+
+      doc.fontSize(10)
+        .fillColor(this.textColor)
+        .font('Helvetica')
+        .text(research.notable_info, 40, y + 28, { width: 500 });
+    }
+
+    doc.moveDown(2);
+  }
+
+  addReservationsSection(doc, reservations) {
+    if (doc.y > 600) doc.addPage();
+
+    const startY = doc.y + 20;
+
+    doc.fontSize(14)
+      .fillColor(this.primaryColor)
+      .font('Helvetica-Bold')
+      .text('Reserveringsgeschiedenis', 40, startY);
+
+    let y = startY + 25;
+
+    for (const res of reservations.slice(0, 5)) {
+      doc.fontSize(10)
+        .fillColor(this.textColor)
+        .font('Helvetica')
+        .text(`${res.check_in_date} - ${res.check_out_date}`, 40, y);
+
+      if (res.room_number) {
+        doc.text(`Kamer: ${res.room_number}`, 200, y);
+      }
+      y += 18;
+    }
+  }
+
+  addInfoRow(doc, label, value, y) {
+    doc.fontSize(10)
+      .fillColor(this.lightGray)
+      .font('Helvetica-Bold')
+      .text(`${label}:`, 40, y);
+
+    doc.fontSize(10)
+      .fillColor(this.textColor)
+      .font('Helvetica')
+      .text(value, 140, y, { width: 400 });
+
+    return y + 18;
+  }
+
+  addSummaryTable(doc, guests) {
+    const startY = doc.y;
+    const colWidths = [30, 150, 120, 80, 70, 60];
+    const headers = ['#', 'Naam', 'Functie', 'Bedrijf', 'Land', 'VIP'];
+
+    // Header row
+    doc.rect(40, startY, 515, 25)
+      .fill(this.primaryColor);
+
+    let x = 45;
+    doc.fontSize(9)
+      .fillColor('#ffffff')
+      .font('Helvetica-Bold');
+
+    headers.forEach((header, i) => {
+      doc.text(header, x, startY + 8);
+      x += colWidths[i];
     });
 
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        ${this.getStyles()}
-      </head>
-      <body>
-        <div class="header">
-          <h1>DAGRAPPORT ARRIVALS</h1>
-          <div class="subtitle">${formattedDate}</div>
-          <div class="date">Gegenereerd om ${new Date().toLocaleTimeString('nl-NL')}</div>
-        </div>
+    // Data rows
+    let y = startY + 25;
+    const vipGuests = guests.filter(g => g.vip_score >= 7);
+    const displayGuests = vipGuests.length > 0 ? vipGuests.slice(0, 10) : guests.slice(0, 10);
 
-        <div class="summary-stats">
-          <div class="stat-box">
-            <div class="stat-value">${guests.length}</div>
-            <div class="stat-label">Arrivals Vandaag</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-value">${guests.filter(g => g.vip_score >= 7).length}</div>
-            <div class="stat-label">VIP Gasten</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-value">${guests.filter(g => g.total_stays > 1).length}</div>
-            <div class="stat-label">Returning</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-value">${guests.filter(g => !g.vip_score).length}</div>
-            <div class="stat-label">Niet Onderzocht</div>
-          </div>
-        </div>
+    displayGuests.forEach((guest, index) => {
+      const isEven = index % 2 === 0;
+      doc.rect(40, y, 515, 22)
+        .fill(isEven ? '#f7fafc' : '#ffffff');
 
-        ${this.buildManagementSummaryTable(guests)}
+      x = 45;
+      doc.fontSize(8)
+        .fillColor(this.textColor)
+        .font('Helvetica');
 
-        <div class="page-break"></div>
+      const rowData = [
+        (index + 1).toString(),
+        (guest.full_name || '').substring(0, 25),
+        (guest.job_title || '-').substring(0, 20),
+        (guest.research_company || guest.company || '-').substring(0, 15),
+        (guest.country || '-').substring(0, 12),
+        guest.vip_score ? `${guest.vip_score}/10` : '-'
+      ];
 
-        ${guests.map((guest, index) => `
-          <div id="guest-${guest.id}" class="guest-card">
-            <div class="guest-header">
-              <div class="header-content">
-                ${guest.profile_photo_url ? `<img src="${guest.profile_photo_url}" class="profile-photo-small">` : ''}
-                <div>
-                  <div class="guest-name">${guest.full_name}</div>
-                  <div style="color: #666; font-size: 10px; margin-top: 3px;">
-                    Kamer ${guest.room_number || 'TBD'} | 
-                    ${guest.check_in_date} - ${guest.check_out_date}
-                  </div>
-                </div>
-              </div>
-              ${guest.vip_score >= 7 ? `
-                <div class="vip-badge">VIP ${guest.vip_score}/10</div>
-              ` : guest.vip_score ? `
-                <div style="color: #666; font-size: 11px;">Score: ${guest.vip_score}/10</div>
-              ` : ''}
-            </div>
-            <div class="info-grid">
-              <div class="info-item">
-                <span class="info-label">Functie</span>
-                <span class="info-value">${guest.job_title || '-'}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Bedrijf</span>
-                <span class="info-value">${guest.research_company || guest.company || '-'}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Land</span>
-                <span class="info-value">${guest.country || '-'}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Verblijven</span>
-                <span class="info-value">${guest.total_stays || 1}x</span>
-              </div>
-            </div>
-            ${(() => {
-        let summary = guest.notable_info || '';
-        if (guest.full_report) {
-          try {
-            const fr = typeof guest.full_report === 'string' ? JSON.parse(guest.full_report) : guest.full_report;
-            if (fr && fr.executive_summary) summary = fr.executive_summary;
-          } catch (e) { }
-        }
-        return summary ? `
-                  <div class="notable-info" style="font-size: 10px; margin-top: 10px;">
-                    ${summary.substring(0, 300)}${summary.length > 300 ? '...' : ''}
-                  </div>
-                ` : '';
-      })()}
-          </div>
-        `).join('')}
+      rowData.forEach((data, i) => {
+        doc.text(data, x, y + 6);
+        x += colWidths[i];
+      });
 
-        <div class="footer">
-          Dit rapport is automatisch gegenereerd door het VIP Guest Research Tool.
-        </div>
-      </body>
-      </html>
-    `;
+      y += 22;
+    });
+
+    if (guests.length > 10) {
+      doc.fontSize(9)
+        .fillColor(this.lightGray)
+        .text(`... en ${guests.length - 10} meer gasten`, 40, y + 5);
+    }
+
+    doc.y = y + 30;
+  }
+
+  addGuestCard(doc, guest, index) {
+    const startY = doc.y + 10;
+    const cardHeight = 100;
+
+    // Card background
+    doc.rect(40, startY, 515, cardHeight)
+      .fill('#f8f9fa')
+      .stroke('#e2e8f0');
+
+    // VIP Score indicator
+    const score = guest.vip_score || 0;
+    const scoreColor = score >= 8 ? '#48bb78' : score >= 5 ? '#ecc94b' : '#e53e3e';
+    doc.rect(40, startY, 5, cardHeight)
+      .fill(scoreColor);
+
+    // Guest name and number
+    doc.fontSize(12)
+      .fillColor(this.primaryColor)
+      .font('Helvetica-Bold')
+      .text(`${index}. ${guest.full_name || 'Onbekende gast'}`, 55, startY + 10);
+
+    // VIP badge
+    doc.fontSize(10)
+      .fillColor(scoreColor)
+      .font('Helvetica-Bold')
+      .text(`VIP: ${score}/10`, 480, startY + 10);
+
+    // Job title & company
+    const subtitle = [guest.job_title, guest.research_company || guest.company]
+      .filter(Boolean)
+      .join(' bij ');
+
+    if (subtitle) {
+      doc.fontSize(10)
+        .fillColor(this.textColor)
+        .font('Helvetica')
+        .text(subtitle.substring(0, 70), 55, startY + 28);
+    }
+
+    // Country and industry
+    const details = [guest.country, guest.industry].filter(Boolean).join(' • ');
+    if (details) {
+      doc.fontSize(9)
+        .fillColor(this.lightGray)
+        .text(details, 55, startY + 45);
+    }
+
+    // Notable info (truncated)
+    if (guest.notable_info) {
+      const truncated = guest.notable_info.substring(0, 150) +
+        (guest.notable_info.length > 150 ? '...' : '');
+      doc.fontSize(8)
+        .fillColor(this.textColor)
+        .text(truncated, 55, startY + 62, { width: 480 });
+    }
+
+    doc.y = startY + cardHeight + 5;
   }
 }
 
