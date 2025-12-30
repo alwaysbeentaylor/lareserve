@@ -22,16 +22,16 @@ function Guests({ onUpdate }) {
 
     // Paginering state
     const [currentPage, setCurrentPage] = useState(1);
-    const ITEMS_PER_PAGE = 10;
+    const [itemsPerPage, setItemsPerPage] = useState(10);
 
     useEffect(() => {
         fetchGuests();
-    }, [search, filter, sortOrder, currentPage]);
+    }, [search, filter, sortOrder, currentPage, itemsPerPage]);
 
-    // Reset naar pagina 1 wanneer filters veranderen
+    // Reset naar pagina 1 wanneer filters of page size veranderen
     useEffect(() => {
         setCurrentPage(1);
-    }, [search, filter, sortOrder]);
+    }, [search, filter, sortOrder, itemsPerPage]);
 
     // Check voor actieve enrichment queue
     useEffect(() => {
@@ -65,8 +65,8 @@ function Guests({ onUpdate }) {
     const fetchGuests = async () => {
         setLoading(true);
         try {
-            const offset = (currentPage - 1) * ITEMS_PER_PAGE;
-            let url = `/api/guests?limit=${ITEMS_PER_PAGE}&offset=${offset}&sort=${sortOrder}`;
+            const offset = (currentPage - 1) * itemsPerPage;
+            let url = `/api/guests?limit=${itemsPerPage}&offset=${offset}&sort=${sortOrder}`;
             if (search) url += `&search=${encodeURIComponent(search)}`;
             if (filter === 'vip') url += `&vipOnly=true`;
             if (filter === 'pending') url += `&hasResearch=false`;
@@ -81,7 +81,7 @@ function Guests({ onUpdate }) {
         }
     };
 
-    const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+    const totalPages = Math.ceil(total / itemsPerPage);
 
     const handleToggleSelection = (id) => {
         setSelectedIds(prev =>
@@ -271,8 +271,8 @@ function Guests({ onUpdate }) {
     };
 
     // Bereken het bereik van getoonde items
-    const startItem = total === 0 ? 0 : (currentPage - 1) * ITEMS_PER_PAGE + 1;
-    const endItem = Math.min(currentPage * ITEMS_PER_PAGE, total);
+    const startItem = total === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
+    const endItem = Math.min(currentPage * itemsPerPage, total);
 
     return (
         <div className="space-y-6">
@@ -491,6 +491,19 @@ function Guests({ onUpdate }) {
                     >
                         <option value="newest">Nieuwste eerst</option>
                         <option value="oldest">Oudste eerst</option>
+                    </select>
+
+                    {/* Per pagina dropdown */}
+                    <select
+                        value={itemsPerPage}
+                        onChange={(e) => setItemsPerPage(parseInt(e.target.value))}
+                        className="input"
+                        style={{ width: 'auto', minWidth: '100px' }}
+                    >
+                        <option value="10">10 per pagina</option>
+                        <option value="50">50 per pagina</option>
+                        <option value="100">100 per pagina</option>
+                        <option value="250">250 per pagina</option>
                     </select>
                 </div>
             </div>

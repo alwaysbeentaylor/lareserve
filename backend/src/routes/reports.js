@@ -3,30 +3,48 @@ const router = express.Router();
 const db = require('../db/database');
 const pdfGenerator = require('../services/pdfGenerator');
 
-// GET /api/reports/daily/pdf - Generate daily report for all guests arriving today
+// GET /api/reports/daily/pdf - Generate daily report for all guests arriving today (or all researched guests)
 router.get('/daily/pdf', async (req, res) => {
     try {
         const { date } = req.query;
         const targetDate = date || new Date().toISOString().split('T')[0];
 
-        const guests = db.prepare(`
-      SELECT DISTINCT g.*, r.vip_score, r.job_title, r.company_name as research_company,
-             r.linkedin_url, r.influence_level, r.notable_info, r.full_report,
-             res.room_number, res.check_in_date, res.check_out_date
-      FROM guests g
-      INNER JOIN reservations res ON res.guest_id = g.id
-      LEFT JOIN research_results r ON r.guest_id = g.id
-      WHERE res.check_in_date = ?
-      ORDER BY r.vip_score DESC NULLS LAST, g.full_name
-    `).all(targetDate);
+        let guests;
+        let reportTitle;
 
-        if (guests.length === 0) {
-            return res.status(404).json({ error: 'Geen gasten gevonden voor deze datum' });
+        if (date === 'all') {
+            // Get all guests with research results
+            guests = db.prepare(`
+              SELECT DISTINCT g.*, r.vip_score, r.job_title, r.company_name as research_company,
+                     r.linkedin_url, r.influence_level, r.notable_info, r.full_report,
+                     NULL as room_number, NULL as check_in_date, NULL as check_out_date
+              FROM guests g
+              INNER JOIN research_results r ON r.guest_id = g.id
+              ORDER BY r.vip_score DESC NULLS LAST, g.full_name
+            `).all();
+            reportTitle = 'alle-gasten';
+        } else {
+            // Get guests arriving on specific date
+            guests = db.prepare(`
+              SELECT DISTINCT g.*, r.vip_score, r.job_title, r.company_name as research_company,
+                     r.linkedin_url, r.influence_level, r.notable_info, r.full_report,
+                     res.room_number, res.check_in_date, res.check_out_date
+              FROM guests g
+              INNER JOIN reservations res ON res.guest_id = g.id
+              LEFT JOIN research_results r ON r.guest_id = g.id
+              WHERE res.check_in_date = ?
+              ORDER BY r.vip_score DESC NULLS LAST, g.full_name
+            `).all(targetDate);
+            reportTitle = targetDate;
         }
 
-        const pdfBuffer = await pdfGenerator.generateDailyReport(guests, targetDate);
+        if (guests.length === 0) {
+            return res.status(404).json({ error: date === 'all' ? 'Geen onderzochte gasten gevonden' : 'Geen gasten gevonden voor deze datum' });
+        }
 
-        const filename = `dagrapport-${targetDate}.pdf`;
+        const pdfBuffer = await pdfGenerator.generateDailyReport(guests, reportTitle);
+
+        const filename = `dagrapport-${reportTitle}.pdf`;
 
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

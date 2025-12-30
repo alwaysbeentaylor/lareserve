@@ -338,7 +338,7 @@ function Dashboard({ onUpdate }) {
             </div>
 
             {/* Quick Actions */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 <a href="/import" className="card p-6 hover:border-[var(--color-accent-gold)] transition-colors block">
                     <div className="text-2xl mb-3">📋</div>
                     <h4 className="font-semibold mb-2">CSV Importeren</h4>
@@ -369,7 +369,17 @@ function Dashboard({ onUpdate }) {
                     </div>
                     <h4 className="font-semibold mb-2">Dagrapport</h4>
                     <p className="text-sm text-[var(--color-text-secondary)]">
-                        Download PDF overzicht van aankomsten op deze datum
+                        Download PDF van aankomsten op deze datum
+                    </p>
+                </div>
+                <div
+                    onClick={() => handleDownloadDailyReport('all')}
+                    className="card p-6 hover:border-[var(--color-accent-gold)] transition-colors cursor-pointer group"
+                >
+                    <div className="text-2xl mb-3">📚</div>
+                    <h4 className="font-semibold mb-2">Alle Gasten</h4>
+                    <p className="text-sm text-[var(--color-text-secondary)]">
+                        Download PDF van alle onderzochte gasten
                     </p>
                 </div>
             </div>
