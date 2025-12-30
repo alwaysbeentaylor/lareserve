@@ -816,5 +816,36 @@ router.get('/history/:guestId', (req, res) => {
     }
 });
 
+// GET /api/import/reservations/debug - Debug endpoint to check reservation data
+router.get('/reservations/debug', (req, res) => {
+    try {
+        const reservations = db.prepare(`
+            SELECT 
+                r.id,
+                r.guest_id,
+                g.full_name,
+                r.check_in_date,
+                r.check_out_date,
+                r.room_number,
+                r.import_batch_id
+            FROM reservations r
+            JOIN guests g ON g.id = r.guest_id
+            ORDER BY r.created_at DESC
+            LIMIT 20
+        `).all();
+
+        const today = new Date().toISOString().split('T')[0];
+
+        res.json({
+            today,
+            reservations,
+            message: `Looking for check_in_date = '${today}'`
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 module.exports = router;
+
 
