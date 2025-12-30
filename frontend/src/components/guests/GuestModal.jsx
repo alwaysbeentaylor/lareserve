@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { apiFetch } from '../../utils/api';
 
 function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
     const [vipScore, setVipScore] = useState(guest.research?.vip_score || 5);
@@ -9,19 +10,33 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
         phone: guest.phone || '',
         country: guest.country || '',
         company: guest.company || '',
-        notes: guest.notes || ''
+        notes: guest.notes || '',
+        linkedin_url: guest.research?.linkedin_url || '',
+        profile_photo_url: guest.research?.profile_photo_url || ''
     });
     const [saving, setSaving] = useState(false);
     const [researching, setResearching] = useState(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [deleting, setDeleting] = useState(false);
+    const [showCandidates, setShowCandidates] = useState(false);
+    const [customInput, setCustomInput] = useState(guest.research?.custom_research_input || '');
+    const [isCustomAnalyzing, setIsCustomAnalyzing] = useState(false);
+    const [showAiAssistant, setShowAiAssistant] = useState(false);
+    const [message, setMessage] = useState(null);
+
+    // DEBUG: Log research data to console
+    useEffect(() => {
+        console.log('🔍 GuestModal Research Data:', guest.research);
+        console.log('📋 LinkedIn Candidates:', guest.research?.linkedin_candidates);
+        console.log('🔗 LinkedIn URL:', guest.research?.linkedin_url);
+        console.log('🌐 Website URL:', guest.research?.website_url);
+    }, [guest]);
 
     const handleVipScoreChange = async (newScore) => {
         setVipScore(newScore);
         try {
-            await fetch(`/api/guests/${guest.id}/vip-score`, {
+            await apiFetch(`/api/guests/${guest.id}/vip-score`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ vip_score: newScore })
             });
         } catch (error) {
@@ -32,16 +47,24 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
     const handleSave = async () => {
         setSaving(true);
         try {
-            const response = await fetch(`/api/guests/${guest.id}`, {
+            await apiFetch(`/api/guests/${guest.id}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(editData)
             });
 
-            if (response.ok) {
-                setIsEditing(false);
-                if (onUpdate) onUpdate();
+            // Also update LinkedIn URL in research if changed
+            if (editData.linkedin_url !== research?.linkedin_url) {
+                await apiFetch(`/api/research/${guest.id}/select-linkedin`, {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        manualUrl: editData.linkedin_url,
+                        profilePhotoUrl: editData.profile_photo_url
+                    })
+                });
             }
+
+            setIsEditing(false);
+            if (onUpdate) onUpdate();
         } catch (error) {
             console.error('Opslaan mislukt:', error);
         } finally {
@@ -49,13 +72,51 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
         }
     };
 
-    const handleResearch = async () => {
+    const handleResearch = async (force = false) => {
         setResearching(true);
         try {
-            await onResearch(guest.id);
+            await apiFetch(`/api/research/${guest.id}`, {
+                method: 'POST',
+                body: JSON.stringify({ forceRefresh: force })
+            });
             if (onUpdate) onUpdate();
+        } catch (error) {
+            console.error('Research mislukt:', error);
         } finally {
             setResearching(false);
+        }
+    };
+
+    const handleAiAnalyze = async () => {
+        if (!customInput.trim()) return;
+        setIsCustomAnalyzing(true);
+        setMessage(null);
+        try {
+            await apiFetch(`/api/research/${guest.id}/ai-analyze`, {
+                method: 'POST',
+                body: JSON.stringify({ customInput })
+            });
+            setMessage({ type: 'success', text: 'AI Rapport bijgewerkt!' });
+            if (onUpdate) onUpdate();
+        } catch (error) {
+            console.error('AI analyse mislukt:', error);
+            setMessage({ type: 'error', text: error.message || 'Fout bij AI analyse' });
+        } finally {
+            setIsCustomAnalyzing(false);
+        }
+    };
+
+    const handleRestore = async () => {
+        setMessage(null);
+        try {
+            await apiFetch(`/api/research/${guest.id}/restore`, {
+                method: 'POST'
+            });
+            setMessage({ type: 'success', text: 'Vorig rapport hersteld' });
+            if (onUpdate) onUpdate();
+        } catch (error) {
+            console.error('Restore mislukt:', error);
+            setMessage({ type: 'error', text: error.message || 'Herstellen mislukt' });
         }
     };
 
@@ -93,30 +154,92 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
             <div className="modal" onClick={(e) => e.stopPropagation()}>
                 {/* Header */}
                 <div className="p-6 border-b border-[var(--color-border)]">
-                    <div className="flex items-start justify-between">
-                        <div>
-                            {isEditing ? (
-                                <input
-                                    type="text"
-                                    value={editData.full_name}
-                                    onChange={(e) => setEditData({ ...editData, full_name: e.target.value })}
-                                    className="input text-xl font-heading font-semibold"
+                    <div className="flex items-center gap-4">
+                        <div className="flex-shrink-0">
+                            {research?.profile_photo_url ? (
+                                <img
+                                    src={research.profile_photo_url}
+                                    alt={guest.full_name}
+                                    className="w-16 h-16 rounded-full object-cover border-2 border-[var(--color-accent-gold)] shadow-md"
+                                    onError={(e) => {
+                                        e.target.onerror = null;
+                                        e.target.style.display = 'none';
+                                        const placeholder = document.createElement('div');
+                                        placeholder.className = "w-16 h-16 rounded-full bg-[var(--color-bg-secondary)] border-2 border-[var(--color-border)] flex items-center justify-center text-xl font-bold text-[var(--color-accent-gold)] shadow-sm";
+                                        placeholder.innerText = guest.full_name.charAt(0).toUpperCase();
+                                        e.target.parentNode.appendChild(placeholder);
+                                    }}
                                 />
                             ) : (
-                                <h2 className="font-heading text-2xl font-semibold">{guest.full_name}</h2>
-                            )}
-                            {research?.job_title && (
-                                <p className="text-[var(--color-text-secondary)] mt-1">
-                                    {research.job_title}
-                                </p>
+                                <div className="w-16 h-16 rounded-full bg-[var(--color-bg-secondary)] border-2 border-[var(--color-border)] flex items-center justify-center text-xl font-bold text-[var(--color-accent-gold)] shadow-sm">
+                                    {guest.full_name.charAt(0).toUpperCase()}
+                                </div>
                             )}
                         </div>
-                        <button
-                            onClick={onClose}
-                            className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] text-2xl"
-                        >
-                            ×
-                        </button>
+                        <div className="flex-1">
+                            <div className="flex items-start justify-between">
+                                <div>
+                                    {isEditing ? (
+                                        <input
+                                            type="text"
+                                            value={editData.full_name}
+                                            onChange={(e) => setEditData({ ...editData, full_name: e.target.value })}
+                                            className="input text-xl font-heading font-semibold"
+                                        />
+                                    ) : (
+                                        <h2 className="font-heading text-2xl font-semibold">{guest.full_name}</h2>
+                                    )}
+                                    {research?.job_title && (
+                                        <p className="text-[var(--color-text-secondary)] mt-1">
+                                            {research.job_title}
+                                        </p>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {!isEditing ? (
+                                        <button
+                                            onClick={() => setIsEditing(true)}
+                                            className="p-2 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-gold)] hover:bg-[var(--color-bg-secondary)] rounded-lg transition-colors"
+                                            title="Bewerken"
+                                        >
+                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                                            </svg>
+                                        </button>
+                                    ) : (
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                onClick={handleSave}
+                                                disabled={saving}
+                                                className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                                                title="Opslaan"
+                                            >
+                                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                                </svg>
+                                            </button>
+                                            <button
+                                                onClick={() => setIsEditing(false)}
+                                                className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                                title="Annuleren"
+                                            >
+                                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={onClose}
+                                        className="p-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] rounded-lg transition-colors text-2xl leading-none"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -224,6 +347,41 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                         </span>
                         <span className="text-sm">{guest.first_seen || '-'}</span>
                     </div>
+
+                    {isEditing && (
+                        <div className="col-span-2">
+                            <span className="text-xs text-[var(--color-text-secondary)] uppercase tracking-wide block mb-1">
+                                Profielfoto URL
+                            </span>
+                            <input
+                                type="text"
+                                value={editData.profile_photo_url}
+                                onChange={(e) => setEditData({ ...editData, profile_photo_url: e.target.value })}
+                                className="input"
+                                placeholder="Plak hier een directe link naar een afbeelding..."
+                            />
+                            <p className="text-[10px] text-gray-500 mt-1">
+                                Tip: Rechtermuisknop op een LinkedIn foto &gt; "Afbeeldingadres kopiëren"
+                            </p>
+                        </div>
+                    )}
+
+                    <div className="col-span-2">
+                        <span className="text-xs text-[var(--color-text-secondary)] uppercase tracking-wide block mb-1">
+                            LinkedIn URL
+                        </span>
+                        {isEditing ? (
+                            <input
+                                type="url"
+                                value={editData.linkedin_url}
+                                onChange={(e) => setEditData({ ...editData, linkedin_url: e.target.value })}
+                                className="input"
+                                placeholder="https://www.linkedin.com/in/..."
+                            />
+                        ) : (
+                            <span className="text-sm truncate block font-mono text-xs">{research?.linkedin_url || '-'}</span>
+                        )}
+                    </div>
                 </div>
 
                 {/* Research Results */}
@@ -254,13 +412,24 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                         {/* Social Media Links */}
                         <div className="flex flex-wrap gap-3 mb-4">
                             {research.linkedin_url && (
-                                <a href={research.linkedin_url} target="_blank" rel="noopener noreferrer"
-                                    className="flex items-center gap-2 px-3 py-2 bg-[#0077B5] text-white rounded-lg text-sm hover:opacity-90">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
-                                    </svg>
-                                    LinkedIn
-                                </a>
+                                <div className="flex items-center gap-2">
+                                    <a href={research.linkedin_url} target="_blank" rel="noopener noreferrer"
+                                        className="flex items-center gap-2 px-3 py-2 bg-[#0077B5] text-white rounded-lg text-sm hover:opacity-90">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
+                                        </svg>
+                                        LinkedIn
+                                    </a>
+                                    {research.linkedin_candidates && research.linkedin_candidates.length > 1 && (
+                                        <button
+                                            onClick={() => setShowCandidates(!showCandidates)}
+                                            className="px-3 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-bg-secondary)] transition-colors"
+                                            title="Andere kandidaten bekijken"
+                                        >
+                                            {showCandidates ? '✕' : '🔄 Wissel'}
+                                        </button>
+                                    )}
+                                </div>
                             )}
                             {research.instagram_url && (
                                 <a href={research.instagram_url} target="_blank" rel="noopener noreferrer"
@@ -299,31 +468,302 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                 </a>
                             )}
                             {research.website_url && (
-                                <a href={research.website_url} target="_blank" rel="noopener noreferrer"
-                                    className="flex items-center gap-2 px-3 py-2 bg-[var(--color-accent-gold)] text-white rounded-lg text-sm hover:opacity-90">
-                                    🌐 Website
+                                <a href={research.website_url.startsWith('http') ? research.website_url : `https://${research.website_url}`}
+                                    target="_blank" rel="noopener noreferrer"
+                                    className="flex items-center gap-2 px-3 py-2 bg-[var(--color-accent-gold)] text-white rounded-lg text-sm hover:opacity-90 transition-all shadow-sm">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                        <line x1="2" y1="12" x2="22" y2="12"></line>
+                                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                                    </svg>
+                                    Website
                                 </a>
                             )}
                         </div>
 
-                        <div className="space-y-3">
+                        {/* LinkedIn Review/Selection Section */}
+                        {research.linkedin_candidates && (
+                            <div className={`mb-6 p-4 border rounded-lg ${research.needs_linkedin_review === 1 ? 'bg-yellow-50 border-yellow-200' : 'bg-gray-50 border-gray-200'}`}>
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-lg">{research.needs_linkedin_review === 1 ? '⚠️' : '📋'}</span>
+                                        <h5 className={`font-semibold text-sm ${research.needs_linkedin_review === 1 ? 'text-yellow-800' : 'text-gray-800'}`}>
+                                            {research.needs_linkedin_review === 1 ? 'LinkedIn Review Nodig' : 'Beschikbare LinkedIn Profielen'}
+                                        </h5>
+                                    </div>
+                                    <button
+                                        onClick={() => setShowCandidates(!showCandidates)}
+                                        className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition-all ${showCandidates
+                                            ? 'bg-white border-[var(--color-border)] text-[var(--color-text-primary)] hover:bg-gray-100'
+                                            : 'bg-[var(--color-accent-gold)] border-[var(--color-accent-gold)] text-white hover:opacity-90'
+                                            }`}
+                                    >
+                                        {showCandidates ? 'Verbergen' : 'Bekijk Opties'}
+                                    </button>
+                                </div>
+
+                                {showCandidates && (
+                                    <div className="mt-4 animate-in fade-in slide-in-from-top-2 duration-200">
+                                        <p className={`text-xs mb-4 ${research.needs_linkedin_review === 1 ? 'text-yellow-700' : 'text-gray-600'}`}>
+                                            {research.needs_linkedin_review === 1
+                                                ? 'We hebben meerdere profielen gevonden. Kies de juiste persoon:'
+                                                : 'Bekijk andere profielen die we hebben gevonden voor deze gast:'}
+                                        </p>
+                                        <div className="space-y-3">
+                                            {(() => {
+                                                try {
+                                                    const candidates = typeof research.linkedin_candidates === 'string'
+                                                        ? JSON.parse(research.linkedin_candidates)
+                                                        : research.linkedin_candidates;
+
+                                                    return candidates.map((candidate, idx) => (
+                                                        <div key={idx} className="flex items-start gap-3 p-3 bg-white rounded border border-gray-200 hover:border-[var(--color-accent-gold)] transition-colors group">
+                                                            {candidate.thumbnail && (
+                                                                <img src={candidate.thumbnail} alt="" className="w-12 h-12 rounded object-cover shadow-sm" />
+                                                            )}
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="font-medium text-sm truncate group-hover:text-[var(--color-accent-gold)] transition-colors">
+                                                                    {candidate.profileName || candidate.title}
+                                                                </div>
+                                                                <div className="text-[10px] text-gray-500 line-clamp-2 mb-2">{candidate.snippet}</div>
+                                                                <div className="flex gap-2">
+                                                                    <a href={candidate.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[10px] text-blue-600 hover:underline">
+                                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                                                                            <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
+                                                                        </svg>
+                                                                        Bekijk Profiel
+                                                                    </a>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            try {
+                                                                                await apiFetch(`/api/research/${guest.id}/select-linkedin`, {
+                                                                                    method: 'PUT',
+                                                                                    body: JSON.stringify({ candidateIndex: idx })
+                                                                                });
+                                                                                setShowCandidates(false);
+                                                                                if (onUpdate) onUpdate();
+                                                                            } catch (e) {
+                                                                                console.error(e);
+                                                                            }
+                                                                        }}
+                                                                        className={`text-[10px] font-bold px-2 py-1 rounded border ${candidate.url === research.linkedin_url
+                                                                            ? 'bg-green-100 text-green-800 border-green-200 cursor-default'
+                                                                            : 'bg-white text-green-600 border-green-600 hover:bg-green-50'}`}
+                                                                    >
+                                                                        {candidate.url === research.linkedin_url ? 'Geselecteerd' : 'Selecteer deze persoon'}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ));
+                                                } catch (e) {
+                                                    return <p className="text-xs text-red-500">Fout bij laden kandidaten</p>;
+                                                }
+                                            })()}
+                                            <button
+                                                onClick={handleResearch}
+                                                className="text-[10px] text-gray-500 hover:text-gray-700 italic underline mt-2 block w-full text-center"
+                                            >
+                                                Niemand klopt? Probeer onderzoek opnieuw met aangepaste gegevens.
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        <div className="space-y-6">
                             {research.industry && (
-                                <div className="flex items-start gap-2">
-                                    <span className="text-sm">🏢</span>
-                                    <span className="text-sm">{research.industry}</span>
+                                <div className="flex items-start gap-2 p-3 bg-[var(--color-bg-secondary)] rounded-lg border border-[var(--color-border)]">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[var(--color-accent-gold)] mt-0.5">
+                                        <rect x="2" y="10" width="20" height="12" rx="2" ry="2"></rect>
+                                        <path d="M7 10V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v5"></path>
+                                        <line x1="12" y1="14" x2="12" y2="18"></line>
+                                        <line x1="8" y1="14" x2="8" y2="18"></line>
+                                        <line x1="16" y1="16" x2="16" y2="16"></line>
+                                    </svg>
+                                    <div className="flex flex-col">
+                                        <span className="text-[10px] text-[var(--color-text-secondary)] uppercase font-semibold">Industrie / Sector</span>
+                                        <span className="text-sm font-medium">{research.industry}</span>
+                                    </div>
                                 </div>
                             )}
-                            {research.notable_info && (
-                                <div className="mt-4 p-4 bg-[var(--color-bg-secondary)] rounded-lg border-l-4 border-[var(--color-accent-gold)]">
-                                    <span className="text-xs text-[var(--color-text-secondary)] uppercase tracking-wide block mb-2">
-                                        Opmerkelijke Info
-                                    </span>
-                                    <p className="text-sm">{research.notable_info}</p>
-                                </div>
-                            )}
+
+                            {/* Full Report Display */}
+                            {(() => {
+                                let fullReport = null;
+                                try {
+                                    fullReport = typeof research.full_report === 'string'
+                                        ? JSON.parse(research.full_report)
+                                        : research.full_report;
+                                } catch (e) {
+                                    console.error('Failed to parse full report', e);
+                                }
+
+                                if (!fullReport) return research.notable_info && (
+                                    <div className="mt-4 p-4 bg-[var(--color-bg-secondary)] rounded-lg border-l-4 border-[var(--color-accent-gold)]">
+                                        <span className="text-xs text-[var(--color-text-secondary)] uppercase tracking-wide block mb-2">
+                                            Opmerkelijke Info
+                                        </span>
+                                        <p className="text-sm">{research.notable_info}</p>
+                                    </div>
+                                );
+
+                                return (
+                                    <div className="space-y-6 mt-6">
+                                        {/* Executive Summary */}
+                                        <div className="p-4 bg-[var(--color-bg-secondary)] rounded-lg border-l-4 border-[var(--color-accent-gold)]">
+                                            <span className="text-xs text-[var(--color-text-secondary)] uppercase tracking-wide block mb-2 font-semibold">
+                                                Executive Summary
+                                            </span>
+                                            <p className="text-sm leading-relaxed text-[var(--color-text-primary)]">
+                                                {fullReport.executive_summary}
+                                            </p>
+                                        </div>
+
+                                        {/* Grid for Professional & Company */}
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            <div className="space-y-3">
+                                                <h5 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-accent-gold)]">
+                                                    Professionele Achtergrond
+                                                </h5>
+                                                <div className="text-sm space-y-2">
+                                                    <p><strong>Huidige rol:</strong> {fullReport.professional_background?.current_role}</p>
+                                                    <p><strong>Carrière:</strong> {fullReport.professional_background?.career_trajectory}</p>
+                                                    <p><strong>Expertise:</strong> {fullReport.professional_background?.industry_expertise}</p>
+                                                    {fullReport.professional_background?.notable_achievements && (
+                                                        <p><strong>Prestaties:</strong> {fullReport.professional_background?.notable_achievements}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <div className="space-y-3">
+                                                <h5 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-accent-gold)]">
+                                                    Bedrijfsanalyse
+                                                </h5>
+                                                <div className="text-sm space-y-2">
+                                                    <p><strong>Bedrijf:</strong> {fullReport.company_analysis?.company_name}</p>
+                                                    <p><strong>Beschrijving:</strong> {fullReport.company_analysis?.company_description}</p>
+                                                    <p><strong>Marktpositie:</strong> {fullReport.company_analysis?.company_position}</p>
+                                                    {fullReport.company_analysis?.employee_count && (
+                                                        <p><strong>Medewerkers:</strong> {fullReport.company_analysis?.employee_count}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* VIP & Service Recommendations */}
+                                        <div className="bg-[var(--color-bg-secondary)] p-4 rounded-lg space-y-4">
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                <div>
+                                                    <h5 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-accent-gold)] mb-2">
+                                                        VIP Indicatoren
+                                                    </h5>
+                                                    <ul className="text-sm list-disc list-inside space-y-1 text-[var(--color-text-secondary)]">
+                                                        <li>{fullReport.vip_indicators?.wealth_signals}</li>
+                                                        <li>{fullReport.vip_indicators?.influence_factors}</li>
+                                                        <li>{fullReport.vip_indicators?.status_markers}</li>
+                                                    </ul>
+                                                </div>
+                                                <div>
+                                                    <h5 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-accent-gold)] mb-2">
+                                                        Service Aanbevelingen
+                                                    </h5>
+                                                    <div className="text-sm space-y-2">
+                                                        <p><span className="badge bg-gold-lite text-[var(--color-accent-gold)] px-2 py-0.5 rounded text-[10px] font-bold mr-2">
+                                                            {fullReport.service_recommendations?.priority_level}
+                                                        </span></p>
+                                                        <p><strong>Focus:</strong> {fullReport.service_recommendations?.special_attention}</p>
+                                                        <p><strong>Stijl:</strong> {fullReport.service_recommendations?.communication_style}</p>
+                                                        <p><strong>Cadeau tip:</strong> {fullReport.service_recommendations?.gift_suggestions}</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {fullReport.additional_notes && (
+                                            <div className="text-xs italic text-[var(--color-text-secondary)]">
+                                                * {fullReport.additional_notes}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })()}
                         </div>
                     </div>
                 )}
+
+                {/* AI Research Assistant */}
+                <div className="p-6 border-t border-[var(--color-border)]">
+                    <button
+                        onClick={() => setShowAiAssistant(!showAiAssistant)}
+                        className="flex items-center justify-between w-full text-left"
+                    >
+                        <div className="flex items-center gap-2">
+                            <span className="text-lg">✨</span>
+                            <h4 className="font-semibold text-sm text-[var(--color-text-primary)] uppercase tracking-wide">
+                                AI Research Assistant
+                            </h4>
+                        </div>
+                        <span className={`transform transition-transform ${showAiAssistant ? 'rotate-180' : ''}`}>
+                            ▼
+                        </span>
+                    </button>
+
+                    {showAiAssistant && (
+                        <div className="mt-4 space-y-4 animate-in fade-in slide-in-from-top-2">
+                            <p className="text-xs text-[var(--color-text-secondary)]">
+                                Voed de AI met informatie die je zelf hebt gevonden (links naar artikelen, LinkedIn posts, of je eigen bevindingen) om een scherper rapport te krijgen.
+                            </p>
+
+                            <textarea
+                                value={customInput}
+                                onChange={(e) => setCustomInput(e.target.value)}
+                                className="input min-h-[120px] text-sm resize-none"
+                                placeholder="Plak hier je bevindingen om het AI rapport te verfijnen..."
+                                disabled={isCustomAnalyzing}
+                            />
+
+                            {message && (
+                                <div className={`p-3 rounded-lg text-xs flex justify-between items-center ${message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+                                    }`}>
+                                    <span>{message.type === 'success' ? '✅' : '❌'} {message.text}</span>
+                                    <button onClick={() => setMessage(null)} className="opacity-50 hover:opacity-100">✕</button>
+                                </div>
+                            )}
+
+                            <div className="flex gap-2 justify-end">
+                                {research?.previous_full_report && (
+                                    <button
+                                        onClick={handleRestore}
+                                        className="btn btn-secondary text-xs py-2 px-4"
+                                        title="Vorig rapport herstellen"
+                                    >
+                                        ↩️ Ongedaan maken
+                                    </button>
+                                )}
+                                <button
+                                    onClick={handleAiAnalyze}
+                                    disabled={isCustomAnalyzing || !customInput.trim()}
+                                    className="btn btn-primary text-xs py-2 px-4 flex items-center gap-2 shadow-sm"
+                                >
+                                    {isCustomAnalyzing ? (
+                                        <>
+                                            <span className="animate-spin text-sm">🔄</span>
+                                            Bezig met verwerken...
+                                        </>
+                                    ) : (
+                                        <>✨ Analyseer met AI</>
+                                    )}
+                                </button>
+                            </div>
+
+                            <p className="text-[10px] text-[var(--color-text-secondary)] italic">
+                                Tip: Hoe meer context je geeft, hoe krachtiger het rapport. De AI combineert dit met bestaande LinkedIn data.
+                            </p>
+                        </div>
+                    )}
+                </div>
 
                 {/* Notes */}
                 {(isEditing || guest.notes) && (
@@ -403,9 +843,18 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                     </div>
 
                     <div className="flex gap-2">
+                        {research && (
+                            <button
+                                onClick={() => handleResearch(true)}
+                                disabled={researching}
+                                className="btn btn-secondary"
+                            >
+                                {researching ? '🔄 Vernieuwen...' : '🔄 Herhaal Onderzoek'}
+                            </button>
+                        )}
                         {!research && (
                             <button
-                                onClick={handleResearch}
+                                onClick={() => handleResearch(false)}
                                 disabled={researching}
                                 className="btn btn-secondary"
                             >

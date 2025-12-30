@@ -5,7 +5,7 @@ const db = require('../db/database');
 // GET /api/guests - List all guests with filters
 router.get('/', (req, res) => {
     try {
-        const { search, country, hasResearch, vipOnly, limit = 100, offset = 0 } = req.query;
+        const { search, country, hasResearch, vipOnly, sort = 'newest', limit = 100, offset = 0 } = req.query;
 
         let query = `
       SELECT 
@@ -58,7 +58,9 @@ router.get('/', (req, res) => {
             query += ` AND r.vip_score >= 7`;
         }
 
-        query += ` ORDER BY g.created_at DESC LIMIT ? OFFSET ?`;
+        // Sortering: 'oldest' of 'newest'
+        const sortOrder = sort === 'oldest' ? 'ASC' : 'DESC';
+        query += ` ORDER BY g.created_at ${sortOrder} LIMIT ? OFFSET ?`;
         params.push(parseInt(limit), parseInt(offset));
 
         const guests = db.prepare(query).all(...params);
@@ -212,6 +214,25 @@ router.put('/:id', (req, res) => {
       WHERE id = ?
     `).run(full_name, email, phone, country, company, notes, id);
 
+        // Also update profile_photo_url if provided in body
+        const { profile_photo_url } = req.body;
+        if (profile_photo_url !== undefined) {
+            const hasResearch = db.prepare('SELECT id FROM research_results WHERE guest_id = ?').get(id);
+            if (hasResearch) {
+                db.prepare(`
+                    UPDATE research_results 
+                    SET profile_photo_url = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guest_id = ?
+                `).run(profile_photo_url, id);
+            } else if (profile_photo_url) {
+                db.prepare(`
+                    INSERT INTO research_results (guest_id, profile_photo_url)
+                    VALUES (?, ?)
+                `).run(id, profile_photo_url);
+            }
+        }
+
+
         const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(id);
 
         res.json(guest);
@@ -234,6 +255,48 @@ router.delete('/:id', (req, res) => {
         db.prepare('DELETE FROM guests WHERE id = ?').run(id);
 
         res.json({ success: true, message: 'Gast verwijderd' });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /api/guests/bulk-delete - Delete multiple guests at once
+router.post('/bulk-delete', (req, res) => {
+    try {
+        const { guestIds } = req.body;
+
+        if (!guestIds || !Array.isArray(guestIds) || guestIds.length === 0) {
+            return res.status(400).json({ error: 'Geen gasten geselecteerd om te verwijderen' });
+        }
+
+        // Begin transaction for bulk delete
+        const deleteGuest = db.prepare('DELETE FROM guests WHERE id = ?');
+        const deleteResearch = db.prepare('DELETE FROM research_results WHERE guest_id = ?');
+        const deleteReservations = db.prepare('DELETE FROM reservations WHERE guest_id = ?');
+        const deleteSuggestions = db.prepare('DELETE FROM deal_suggestions WHERE guest_id = ?');
+
+        const deleteMany = db.transaction((ids) => {
+            let deletedCount = 0;
+            for (const id of ids) {
+                // Delete related data first
+                deleteResearch.run(id);
+                deleteReservations.run(id);
+                deleteSuggestions.run(id);
+                // Then delete the guest
+                const result = deleteGuest.run(id);
+                if (result.changes > 0) deletedCount++;
+            }
+            return deletedCount;
+        });
+
+        const deletedCount = deleteMany(guestIds);
+
+        res.json({
+            success: true,
+            message: `${deletedCount} gast${deletedCount !== 1 ? 'en' : ''} verwijderd`,
+            deletedCount
+        });
 
     } catch (error) {
         res.status(500).json({ error: error.message });

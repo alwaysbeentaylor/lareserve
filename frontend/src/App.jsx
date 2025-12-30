@@ -1,5 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom';
 import { useState, useEffect } from 'react';
+import { apiFetch } from './utils/api';
 import Dashboard from './pages/Dashboard';
 import Import from './pages/Import';
 import Guests from './pages/Guests';
@@ -17,13 +18,10 @@ function App() {
 
   const fetchStats = async () => {
     try {
-      const response = await fetch('/api/dashboard/stats');
-      if (response.ok) {
-        const data = await response.json();
-        setStats(data);
-      }
+      const data = await apiFetch('/api/dashboard/stats');
+      setStats(data);
     } catch (error) {
-      console.log('Backend nog niet gestart');
+      console.log('Backend nog niet gestart of niet bereikbaar');
     }
   };
 

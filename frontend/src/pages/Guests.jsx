@@ -1,34 +1,79 @@
 import { useState, useEffect } from 'react';
 import GuestModal from '../components/guests/GuestModal';
 import AddGuestForm from '../components/guests/AddGuestForm';
+import { apiFetch } from '../utils/api';
 
 function Guests({ onUpdate }) {
     const [guests, setGuests] = useState([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [filter, setFilter] = useState('all'); // all, vip, pending
+    const [sortOrder, setSortOrder] = useState('newest'); // newest, oldest
     const [selectedGuest, setSelectedGuest] = useState(null);
     const [showAddForm, setShowAddForm] = useState(false);
     const [total, setTotal] = useState(0);
+    const [selectedIds, setSelectedIds] = useState([]);
+    const [downloadingSelected, setDownloadingSelected] = useState(false);
+    const [deletingSelected, setDeletingSelected] = useState(false);
+    const [researchingIds, setResearchingIds] = useState([]);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [enrichmentProgress, setEnrichmentProgress] = useState(null);
+    const [showErrorDetails, setShowErrorDetails] = useState(false);
+
+    // Paginering state
+    const [currentPage, setCurrentPage] = useState(1);
+    const ITEMS_PER_PAGE = 10;
 
     useEffect(() => {
         fetchGuests();
-    }, [search, filter]);
+    }, [search, filter, sortOrder, currentPage]);
+
+    // Reset naar pagina 1 wanneer filters veranderen
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [search, filter, sortOrder]);
+
+    // Check voor actieve enrichment queue
+    useEffect(() => {
+        const checkActiveQueue = async () => {
+            try {
+                const data = await apiFetch('/api/research/queue/active');
+                if (data.active) {
+                    setEnrichmentProgress(data);
+                }
+            } catch (err) {
+                console.error('Fout bij checken actieve queue:', err);
+            }
+        };
+
+        checkActiveQueue();
+        const interval = setInterval(checkActiveQueue, 3000);
+        return () => clearInterval(interval);
+    }, []);
+
+    // Indien enrichment bezig is, ververs gastenlijst periodiek
+    useEffect(() => {
+        if (enrichmentProgress && enrichmentProgress.status === 'running') {
+            const interval = setInterval(() => {
+                fetchGuests();
+                if (onUpdate) onUpdate();
+            }, 5000);
+            return () => clearInterval(interval);
+        }
+    }, [enrichmentProgress]);
 
     const fetchGuests = async () => {
         setLoading(true);
         try {
-            let url = `/api/guests?limit=50`;
+            const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+            let url = `/api/guests?limit=${ITEMS_PER_PAGE}&offset=${offset}&sort=${sortOrder}`;
             if (search) url += `&search=${encodeURIComponent(search)}`;
             if (filter === 'vip') url += `&vipOnly=true`;
             if (filter === 'pending') url += `&hasResearch=false`;
 
-            const response = await fetch(url);
-            if (response.ok) {
-                const data = await response.json();
-                setGuests(data.guests || []);
-                setTotal(data.total || 0);
-            }
+            const data = await apiFetch(url);
+            setGuests(data.guests || []);
+            setTotal(data.total || 0);
         } catch (error) {
             console.log('Fout bij ophalen gasten');
         } finally {
@@ -36,25 +81,159 @@ function Guests({ onUpdate }) {
         }
     };
 
-    const handleResearch = async (guestId) => {
+    const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+
+    const handleToggleSelection = (id) => {
+        setSelectedIds(prev =>
+            prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+        );
+    };
+
+    const handleSelectAll = () => {
+        if (selectedIds.length === guests.length) {
+            setSelectedIds([]);
+        } else {
+            setSelectedIds(guests.map(g => g.id));
+        }
+    };
+
+    const handleDownloadSelected = async () => {
+        if (selectedIds.length === 0) return;
+
+        setDownloadingSelected(true);
         try {
-            const response = await fetch(`/api/research/${guestId}`, {
+            const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+            const response = await fetch(`${API_BASE_URL}/api/reports/selected/pdf`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ guestIds: selectedIds })
             });
 
             if (response.ok) {
-                fetchGuests();
-                if (onUpdate) onUpdate();
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `selectie-gastrapporten-${new Date().getTime()}.pdf`;
+                a.click();
+                window.URL.revokeObjectURL(url);
+                setSelectedIds([]);
             }
         } catch (error) {
+            console.error('Download geselecteerde gasten mislukt:', error);
+        } finally {
+            setDownloadingSelected(false);
+        }
+    };
+
+    const handleDeleteSelected = async () => {
+        if (selectedIds.length === 0) return;
+
+        setDeletingSelected(true);
+        try {
+            const data = await apiFetch('/api/guests/bulk-delete', {
+                method: 'POST',
+                body: JSON.stringify({ guestIds: selectedIds })
+            });
+            console.log(data.message);
+            setSelectedIds([]);
+            setShowDeleteConfirm(false);
+            fetchGuests();
+            if (onUpdate) onUpdate();
+        } catch (error) {
+            console.error('Verwijderen geselecteerde gasten mislukt:', error);
+        } finally {
+            setDeletingSelected(false);
+        }
+    };
+
+    const handleBulkResearch = async () => {
+        if (selectedIds.length === 0) return;
+
+        try {
+            const data = await apiFetch('/api/research/queue/start', {
+                method: 'POST',
+                body: JSON.stringify({ guestIds: selectedIds })
+            });
+            console.log('Bulk research gestart:', data.queueId);
+            setSelectedIds([]);
+        } catch (error) {
+            console.error('Bulk research mislukt:', error);
+        }
+    };
+
+    const handleEnrichAll = async () => {
+        try {
+            const data = await apiFetch('/api/research/queue/start-pending', {
+                method: 'POST'
+            });
+            console.log('Enrich all started:', data.queueId);
+        } catch (error) {
+            console.error('Enrich all mislukt:', error);
+        }
+    };
+
+    const handlePauseQueue = async () => {
+        if (!enrichmentProgress?.queueId) return;
+        setEnrichmentProgress(prev => ({ ...prev, status: 'paused' }));
+        try {
+            await apiFetch(`/api/research/queue/${enrichmentProgress.queueId}/pause`, { method: 'POST' });
+        } catch (error) {
+            console.error('Pauzeren mislukt:', error);
+        }
+    };
+
+    const handleResumeQueue = async () => {
+        if (!enrichmentProgress?.queueId) return;
+        setEnrichmentProgress(prev => ({ ...prev, status: 'running' }));
+        try {
+            await apiFetch(`/api/research/queue/${enrichmentProgress.queueId}/resume`, { method: 'POST' });
+        } catch (error) {
+            console.error('Hervatten mislukt:', error);
+        }
+    };
+
+    const handleStopQueue = async () => {
+        if (!enrichmentProgress?.queueId) return;
+        // Immediate visual stop
+        setEnrichmentProgress(prev => ({ ...prev, status: 'stopped' }));
+        try {
+            await apiFetch(`/api/research/queue/${enrichmentProgress.queueId}/stop`, { method: 'POST' });
+        } catch (error) {
+            console.error('Stoppen mislukt:', error);
+        }
+    };
+
+    const handleSkipGuest = async () => {
+        if (!enrichmentProgress?.queueId) return;
+        try {
+            await apiFetch(`/api/research/queue/${enrichmentProgress.queueId}/skip`, { method: 'POST' });
+        } catch (error) {
+            console.error('Overslaan mislukt:', error);
+        }
+    };
+
+    const handleResearch = async (guestId) => {
+        if (researchingIds.includes(guestId)) return;
+
+        setResearchingIds(prev => [...prev, guestId]);
+        try {
+            await apiFetch(`/api/research/${guestId}`, {
+                method: 'POST'
+            });
+            fetchGuests();
+            if (onUpdate) onUpdate();
+        } catch (error) {
             console.error('Research mislukt:', error);
+        } finally {
+            setResearchingIds(prev => prev.filter(id => id !== guestId));
         }
     };
 
     const handleDownloadPDF = async (guestId, guestName) => {
         try {
-            const response = await fetch(`/api/reports/${guestId}/pdf`);
+            const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+            const response = await fetch(`${API_BASE_URL}/api/reports/${guestId}/pdf`);
             if (response.ok) {
                 const blob = await response.blob();
                 const url = window.URL.createObjectURL(blob);
@@ -71,11 +250,8 @@ function Guests({ onUpdate }) {
 
     const handleGuestClick = async (guest) => {
         try {
-            const response = await fetch(`/api/guests/${guest.id}`);
-            if (response.ok) {
-                const fullGuest = await response.json();
-                setSelectedGuest(fullGuest);
-            }
+            const fullGuest = await apiFetch(`/api/guests/${guest.id}`);
+            setSelectedGuest(fullGuest);
         } catch (error) {
             console.error('Fout bij ophalen gastdetails:', error);
         }
@@ -94,6 +270,10 @@ function Guests({ onUpdate }) {
         if (onUpdate) onUpdate();
     };
 
+    // Bereken het bereik van getoonde items
+    const startItem = total === 0 ? 0 : (currentPage - 1) * ITEMS_PER_PAGE + 1;
+    const endItem = Math.min(currentPage * ITEMS_PER_PAGE, total);
+
     return (
         <div className="space-y-6">
             {/* Header */}
@@ -104,16 +284,173 @@ function Guests({ onUpdate }) {
                         {total} gasten gevonden
                     </p>
                 </div>
-                <button
-                    onClick={() => setShowAddForm(true)}
-                    className="btn btn-primary"
-                >
-                    <span>+</span>
-                    Gast Toevoegen
-                </button>
+                <div className="flex gap-2 flex-wrap">
+                    {selectedIds.length > 0 && (
+                        <>
+                            <button
+                                onClick={() => setShowDeleteConfirm(true)}
+                                disabled={deletingSelected}
+                                className="btn btn-secondary border-red-500 text-red-500 hover:bg-red-50"
+                            >
+                                🗑️ Verwijderen ({selectedIds.length})
+                            </button>
+                            <button
+                                onClick={handleDownloadSelected}
+                                disabled={downloadingSelected}
+                                className={`btn btn-secondary border-[var(--color-accent-gold)] text-[var(--color-accent-gold)] ${downloadingSelected ? 'opacity-50' : ''}`}
+                            >
+                                {downloadingSelected ? '📄 Genereren...' : `📄 Download (${selectedIds.length})`}
+                            </button>
+                            <button
+                                onClick={handleBulkResearch}
+                                className="btn btn-secondary border-purple-500 text-purple-600 hover:bg-purple-50"
+                            >
+                                🤖 AI Verrijken
+                            </button>
+                        </>
+                    )}
+                    <button
+                        onClick={() => setShowAddForm(true)}
+                        className="btn btn-primary"
+                    >
+                        <span>+</span>
+                        Gast Toevoegen
+                    </button>
+                    <button
+                        onClick={handleEnrichAll}
+                        className="btn btn-secondary border-purple-500 text-purple-600 hover:bg-purple-100 transition-colors"
+                        title="Start AI onderzoek voor alle gasten zonder resultaten"
+                    >
+                        🔮 Verrijk Alle Resterende
+                    </button>
+                </div>
             </div>
 
-            {/* Filters */}
+            {/* Enrichment Progress Bar */}
+            {enrichmentProgress && (enrichmentProgress.status === 'running' || enrichmentProgress.status === 'paused' || enrichmentProgress.status === 'stopped' || (enrichmentProgress.status === 'completed' && enrichmentProgress.progress === 100)) && (
+                <div className={`card overflow-hidden border-2 transition-colors ${enrichmentProgress.status === 'stopped' ? 'border-red-200' : 'border-purple-200'}`}>
+                    <div className={`p-4 border-b border-[var(--color-border)] ${enrichmentProgress.status === 'stopped' ? 'bg-red-50' : 'bg-purple-50'}`}>
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="text-2xl animate-pulse">
+                                    {enrichmentProgress.status === 'completed' ? '✅' : enrichmentProgress.status === 'stopped' ? '⏹️' : '🤖'}
+                                </div>
+                                <div className="flex-1">
+                                    <h4 className={`font-semibold flex items-center gap-2 ${enrichmentProgress.status === 'stopped' ? 'text-red-800' : 'text-purple-800'}`}>
+                                        {enrichmentProgress.status === 'completed'
+                                            ? 'AI Research Voltooid!'
+                                            : enrichmentProgress.status === 'paused'
+                                                ? 'AI Research Gepauzeerd'
+                                                : enrichmentProgress.status === 'stopped'
+                                                    ? 'AI Research Gestopt'
+                                                    : 'AI Research Bezig...'}
+                                        {enrichmentProgress.status === 'paused' && <span className="text-[10px] px-2 py-0.5 bg-purple-200 text-purple-700 rounded-full animate-pulse">GEPAUZEERD</span>}
+                                        {enrichmentProgress.status === 'stopped' && <span className="text-[10px] px-2 py-0.5 bg-red-200 text-red-700 rounded-full">GESTOP T</span>}
+                                    </h4>
+                                    <p className={`text-sm ${enrichmentProgress.status === 'stopped' ? 'text-red-600' : 'text-purple-600'}`}>
+                                        {enrichmentProgress.status === 'stopped'
+                                            ? `Proces beëindigd op ${enrichmentProgress.completed} gasten`
+                                            : enrichmentProgress.currentName
+                                                ? `Onderzoeken: ${enrichmentProgress.currentName}`
+                                                : `${enrichmentProgress.completed} van ${enrichmentProgress.total} gasten verrijkt`}
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                {enrichmentProgress.status === 'running' && (
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={handlePauseQueue}
+                                            className="p-2 text-purple-600 hover:bg-purple-100 rounded-lg transition-colors"
+                                            title="Pauzeren"
+                                        >
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
+                                        </button>
+                                        <button
+                                            onClick={handleSkipGuest}
+                                            className="p-2 text-purple-600 hover:bg-purple-100 rounded-lg transition-colors"
+                                            title="Huidige gast overslaan"
+                                        >
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" y1="5" x2="19" y2="19" /></svg>
+                                        </button>
+                                        <button
+                                            onClick={handleStopQueue}
+                                            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                            title="Stoppen"
+                                        >
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /></svg>
+                                        </button>
+                                    </div>
+                                )}
+                                {(enrichmentProgress.status === 'paused' || enrichmentProgress.status === 'stopped') && (
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={handleResumeQueue}
+                                            className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                                            title="Hervatten"
+                                        >
+                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                                        </button>
+                                        {enrichmentProgress.status === 'paused' && (
+                                            <button
+                                                onClick={handleStopQueue}
+                                                className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                                title="Stoppen"
+                                            >
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /></svg>
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
+                                <div className="text-2xl font-bold text-purple-700">
+                                    {enrichmentProgress.progress}%
+                                </div>
+                                <button
+                                    onClick={() => setEnrichmentProgress(null)}
+                                    className="text-purple-400 hover:text-purple-600"
+                                >
+                                    ×
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="h-3 bg-purple-100">
+                        <div
+                            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-500"
+                            style={{ width: `${enrichmentProgress.progress}%` }}
+                        />
+                    </div>
+                    {enrichmentProgress.errors && enrichmentProgress.errors.length > 0 && (
+                        <div className="p-4 bg-red-50 border-t border-red-100">
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs text-red-600 font-medium italic">
+                                    ⚠️ {enrichmentProgress.errors.length} gasten overgeslagen door onderzoeksfouten.
+                                </span>
+                                <button
+                                    onClick={() => setShowErrorDetails(!showErrorDetails)}
+                                    className="text-[10px] text-red-500 underline hover:text-red-700"
+                                >
+                                    {showErrorDetails ? 'Details Verbergen' : 'Details Tonen'}
+                                </button>
+                            </div>
+
+                            {showErrorDetails && (
+                                <div className="mt-3 space-y-2 max-h-32 overflow-y-auto pr-2 custom-scrollbar">
+                                    {enrichmentProgress.errors.map((err, idx) => (
+                                        <div key={idx} className="flex justify-between items-start text-[10px] py-1 border-b border-red-100 last:border-0">
+                                            <span className="font-semibold text-red-700">{err.name || 'Onbekende gast'}:</span>
+                                            <span className="text-red-500 text-right ml-2">{err.error}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
+
+
+            {/* Filters en Sortering */}
             <div className="flex flex-col sm:flex-row gap-4">
                 <div className="flex-1">
                     <input
@@ -124,7 +461,8 @@ function Guests({ onUpdate }) {
                         className="input"
                     />
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
+                    {/* Status filters */}
                     <button
                         onClick={() => setFilter('all')}
                         className={`btn ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
@@ -143,6 +481,17 @@ function Guests({ onUpdate }) {
                     >
                         Niet onderzocht
                     </button>
+
+                    {/* Sortering dropdown */}
+                    <select
+                        value={sortOrder}
+                        onChange={(e) => setSortOrder(e.target.value)}
+                        className="input"
+                        style={{ width: 'auto', minWidth: '140px' }}
+                    >
+                        <option value="newest">Nieuwste eerst</option>
+                        <option value="oldest">Oudste eerst</option>
+                    </select>
                 </div>
             </div>
 
@@ -157,6 +506,14 @@ function Guests({ onUpdate }) {
                         <table className="table">
                             <thead>
                                 <tr>
+                                    <th className="w-10">
+                                        <input
+                                            type="checkbox"
+                                            checked={guests.length > 0 && selectedIds.length === guests.length}
+                                            onChange={handleSelectAll}
+                                            className="rounded border-[var(--color-border)] text-[var(--color-accent-gold)] focus:ring-[var(--color-accent-gold)]"
+                                        />
+                                    </th>
                                     <th>Naam</th>
                                     <th>Functie</th>
                                     <th>Bedrijf</th>
@@ -170,13 +527,50 @@ function Guests({ onUpdate }) {
                                 {guests.map((guest) => (
                                     <tr
                                         key={guest.id}
-                                        className="clickable"
+                                        className={`clickable ${selectedIds.includes(guest.id) ? 'bg-[var(--color-bg-secondary)]' : ''}`}
                                         onClick={() => handleGuestClick(guest)}
                                     >
+                                        <td onClick={(e) => e.stopPropagation()}>
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedIds.includes(guest.id)}
+                                                onChange={() => handleToggleSelection(guest.id)}
+                                                className="rounded border-[var(--color-border)] text-[var(--color-accent-gold)] focus:ring-[var(--color-accent-gold)]"
+                                            />
+                                        </td>
                                         <td>
-                                            <div className="flex items-center gap-2">
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex-shrink-0">
+                                                    {guest.profile_photo_url ? (
+                                                        <img
+                                                            src={guest.profile_photo_url}
+                                                            alt={guest.full_name}
+                                                            className="w-10 h-10 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
+                                                            onError={(e) => {
+                                                                e.target.onerror = null;
+                                                                e.target.style.display = 'none';
+                                                                const placeholder = document.createElement('div');
+                                                                placeholder.className = "w-10 h-10 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] flex items-center justify-center text-[var(--color-text-secondary)] font-semibold shadow-sm";
+                                                                placeholder.innerText = guest.full_name.charAt(0).toUpperCase();
+                                                                e.target.parentNode.appendChild(placeholder);
+                                                            }}
+                                                        />
+                                                    ) : (
+                                                        <div className="w-10 h-10 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] flex items-center justify-center text-[var(--color-text-secondary)] font-semibold shadow-sm">
+                                                            {guest.full_name.charAt(0).toUpperCase()}
+                                                        </div>
+                                                    )}
+                                                </div>
                                                 <div>
-                                                    <div className="font-medium">{guest.full_name}</div>
+                                                    <div className="font-medium flex items-center gap-2">
+                                                        {guest.full_name}
+                                                        {enrichmentProgress?.current === guest.id && (
+                                                            <span className="inline-flex items-center text-[10px] text-purple-600 font-normal bg-purple-50 px-2 py-0.5 rounded-full animate-pulse">
+                                                                <span className="animate-spin mr-1">🔄</span>
+                                                                AI analyse...
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     {guest.email && (
                                                         <div className="text-xs text-[var(--color-text-secondary)]">
                                                             {guest.email}
@@ -185,12 +579,23 @@ function Guests({ onUpdate }) {
                                                 </div>
                                                 <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
                                                     {guest.linkedin_url && (
-                                                        <a href={guest.linkedin_url} target="_blank" rel="noopener noreferrer"
-                                                            className="social-icon" title="LinkedIn">
-                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                                                <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
-                                                            </svg>
-                                                        </a>
+                                                        <div className="relative group">
+                                                            <a href={guest.linkedin_url} target="_blank" rel="noopener noreferrer"
+                                                                className={`social-icon ${guest.needs_linkedin_review ? 'border-yellow-500 text-yellow-500' : ''}`} title="LinkedIn">
+                                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                                    <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
+                                                                </svg>
+                                                            </a>
+                                                            {guest.needs_linkedin_review === 1 && (
+                                                                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
+                                                                    <span className="relative inline-flex rounded-full h-3 w-3 bg-yellow-500"></span>
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                    {!guest.linkedin_url && guest.needs_linkedin_review === 1 && (
+                                                        <span className="text-yellow-500" title="Review nodig">⚠️</span>
                                                     )}
                                                     {guest.instagram_url && (
                                                         <a href={guest.instagram_url} target="_blank" rel="noopener noreferrer"
@@ -213,6 +618,17 @@ function Guests({ onUpdate }) {
                                                             className="social-icon" title="Facebook">
                                                             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                                                                 <path d="M9 8h-3v4h3v12h5v-12h3.642l.358-4h-4v-1.667c0-.955.192-1.333 1.115-1.333h2.885v-5h-3.808c-3.596 0-5.192 1.583-5.192 4.615v3.385z" />
+                                                            </svg>
+                                                        </a>
+                                                    )}
+                                                    {guest.website_url && (
+                                                        <a href={guest.website_url.startsWith('http') ? guest.website_url : `https://${guest.website_url}`}
+                                                            target="_blank" rel="noopener noreferrer"
+                                                            className="social-icon text-[var(--color-accent-gold)]" title="Website">
+                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                <circle cx="12" cy="12" r="10"></circle>
+                                                                <line x1="2" y1="12" x2="22" y2="12"></line>
+                                                                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
                                                             </svg>
                                                         </a>
                                                     )}
@@ -250,21 +666,30 @@ function Guests({ onUpdate }) {
                                         </td>
                                         <td onClick={(e) => e.stopPropagation()}>
                                             <div className="flex gap-2">
-                                                {!guest.researched_at && (
-                                                    <button
-                                                        onClick={() => handleResearch(guest.id)}
-                                                        className="btn btn-ghost text-xs px-3 py-1"
-                                                    >
-                                                        🔍 Onderzoek
-                                                    </button>
-                                                )}
-                                                {guest.vip_score && (
-                                                    <button
-                                                        onClick={() => handleDownloadPDF(guest.id, guest.full_name)}
-                                                        className="btn btn-ghost text-xs px-3 py-1"
-                                                    >
-                                                        📄 PDF
-                                                    </button>
+                                                {researchingIds.includes(guest.id) ? (
+                                                    <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-lg border border-gray-100">
+                                                        <span className="animate-spin text-xs">🔄</span>
+                                                        <span className="text-[10px] font-medium text-gray-500 uppercase tracking-tight">Onderzoeken...</span>
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        {!guest.researched_at && (
+                                                            <button
+                                                                onClick={() => handleResearch(guest.id)}
+                                                                className="btn btn-ghost text-xs px-3 py-1 hover:bg-[var(--color-accent-gold-lite)] transition-all"
+                                                            >
+                                                                🔍 Onderzoek
+                                                            </button>
+                                                        )}
+                                                        {guest.vip_score && (
+                                                            <button
+                                                                onClick={() => handleDownloadPDF(guest.id, guest.full_name)}
+                                                                className="btn btn-ghost text-xs px-3 py-1 hover:bg-gray-100 transition-all text-gray-700"
+                                                            >
+                                                                📄 PDF
+                                                            </button>
+                                                        )}
+                                                    </>
                                                 )}
                                             </div>
                                         </td>
@@ -282,7 +707,109 @@ function Guests({ onUpdate }) {
                         </p>
                     </div>
                 )}
+
+                {/* Paginering */}
+                {totalPages > 1 && (
+                    <div className="flex items-center justify-between px-6 py-4 border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                            Toon {startItem}-{endItem} van {total} gasten
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => setCurrentPage(1)}
+                                disabled={currentPage === 1}
+                                className="btn btn-ghost text-xs px-3 py-1 disabled:opacity-40"
+                                title="Eerste pagina"
+                            >
+                                ««
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                                disabled={currentPage === 1}
+                                className="btn btn-ghost text-xs px-3 py-1 disabled:opacity-40"
+                            >
+                                « Vorige
+                            </button>
+
+                            {/* Pagina nummers */}
+                            <div className="flex items-center gap-1">
+                                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                                    let pageNum;
+                                    if (totalPages <= 5) {
+                                        pageNum = i + 1;
+                                    } else if (currentPage <= 3) {
+                                        pageNum = i + 1;
+                                    } else if (currentPage >= totalPages - 2) {
+                                        pageNum = totalPages - 4 + i;
+                                    } else {
+                                        pageNum = currentPage - 2 + i;
+                                    }
+
+                                    return (
+                                        <button
+                                            key={pageNum}
+                                            onClick={() => setCurrentPage(pageNum)}
+                                            className={`btn text-xs px-3 py-1 ${currentPage === pageNum ? 'btn-primary' : 'btn-ghost'}`}
+                                        >
+                                            {pageNum}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            <button
+                                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                                disabled={currentPage === totalPages}
+                                className="btn btn-ghost text-xs px-3 py-1 disabled:opacity-40"
+                            >
+                                Volgende »
+                            </button>
+                            <button
+                                onClick={() => setCurrentPage(totalPages)}
+                                disabled={currentPage === totalPages}
+                                className="btn btn-ghost text-xs px-3 py-1 disabled:opacity-40"
+                                title="Laatste pagina"
+                            >
+                                »»
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
+
+            {/* Delete Confirmation Modal */}
+            {showDeleteConfirm && (
+                <div className="modal-overlay" onClick={() => setShowDeleteConfirm(false)}>
+                    <div className="modal" style={{ maxWidth: '400px' }} onClick={(e) => e.stopPropagation()}>
+                        <div className="p-6">
+                            <h3 className="font-heading text-xl font-semibold mb-4">Gasten Verwijderen</h3>
+                            <p className="text-[var(--color-text-secondary)] mb-6">
+                                Weet je zeker dat je <strong>{selectedIds.length} gast{selectedIds.length !== 1 ? 'en' : ''}</strong> wilt verwijderen?
+                                Dit verwijdert ook alle bijbehorende onderzoeksgegevens en kan niet ongedaan worden gemaakt.
+                            </p>
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    onClick={() => setShowDeleteConfirm(false)}
+                                    className="btn btn-secondary"
+                                >
+                                    Annuleren
+                                </button>
+                                <button
+                                    onClick={handleDeleteSelected}
+                                    disabled={deletingSelected}
+                                    className="btn"
+                                    style={{
+                                        background: 'linear-gradient(135deg, #DC2626, #B91C1C)',
+                                        color: 'white'
+                                    }}
+                                >
+                                    {deletingSelected ? 'Verwijderen...' : `🗑️ Verwijderen (${selectedIds.length})`}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Guest Modal */}
             {selectedGuest && (

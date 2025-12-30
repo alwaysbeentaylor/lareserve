@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { apiFetch } from '../../utils/api';
 
 const COUNTRIES = [
     'België', 'Nederland', 'Frankrijk', 'Duitsland', 'Verenigd Koninkrijk',
@@ -31,29 +32,21 @@ function AddGuestForm({ onClose, onSuccess }) {
         setError(null);
 
         try {
-            const response = await fetch('/api/guests', {
+            const data = await apiFetch('/api/guests', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(formData)
             });
 
-            const data = await response.json();
-
-            if (response.ok) {
-                // Optionally start research
-                if (startResearch && data.id) {
-                    await fetch(`/api/research/${data.id}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' }
-                    });
-                }
-
-                if (onSuccess) onSuccess();
-            } else {
-                setError(data.error || 'Opslaan mislukt');
+            // Optionally start research
+            if (startResearch && data.id) {
+                await apiFetch(`/api/research/${data.id}`, {
+                    method: 'POST'
+                });
             }
+
+            if (onSuccess) onSuccess();
         } catch (err) {
-            setError('Verbinding met server mislukt');
+            setError(err.message || 'Opslaan mislukt');
         } finally {
             setSaving(false);
         }

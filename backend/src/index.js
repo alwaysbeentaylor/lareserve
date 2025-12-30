@@ -6,17 +6,37 @@ const path = require('path');
 // Routes
 const importRoutes = require('./routes/import');
 const guestRoutes = require('./routes/guests');
-const researchRoutes = require('./routes/research');
+const { router: researchRoutes, resumeActiveQueues } = require('./routes/research');
 const reportRoutes = require('./routes/reports');
 
 // Database
 const db = require('./db/database');
 
+// Resume any abandoned background tasks
+resumeActiveQueues();
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
-app.use(cors());
+const allowedOrigins = [
+  'http://localhost:5173',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
