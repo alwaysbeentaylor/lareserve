@@ -1,369 +1,506 @@
-const PDFDocument = require('pdfkit');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 /**
- * PDF Generator Service using PDFKit
- * Generates professional PDF reports for guests without requiring a browser
+ * PDF Generator Service
+ * Generates professional PDF reports for guests
+ * Uses @sparticuz/chromium for serverless compatibility
  */
 
 class PDFGenerator {
   constructor() {
-    this.primaryColor = '#1a365d';
-    this.accentColor = '#c9a227';
-    this.textColor = '#2d3748';
-    this.lightGray = '#718096';
+    this.browser = null;
+  }
+
+  async getBrowser() {
+    if (!this.browser) {
+      this.browser = await puppeteer.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+      });
+    }
+    return this.browser;
   }
 
   // Generate PDF for a single guest
   async generateGuestReport({ guest, research, reservations, suggestions }) {
-    return new Promise((resolve, reject) => {
-      try {
-        const doc = new PDFDocument({ margin: 50, size: 'A4' });
-        const chunks = [];
-
-        doc.on('data', chunk => chunks.push(chunk));
-        doc.on('end', () => resolve(Buffer.concat(chunks)));
-        doc.on('error', reject);
-
-        this.addHeader(doc, 'Gastprofiel');
-        this.addGuestInfo(doc, guest, research);
-
-        if (research) {
-          this.addResearchSection(doc, research);
-        }
-
-        if (reservations && reservations.length > 0) {
-          this.addReservationsSection(doc, reservations);
-        }
-
-        doc.end();
-      } catch (error) {
-        reject(error);
-      }
-    });
+    const html = this.buildGuestReportHTML(guest, research, reservations, suggestions);
+    return this.generatePDF(html);
   }
 
   // Generate bulk PDF for multiple guests (import batch)
   async generateBulkReport(guests, batchId) {
-    return this.generateDailyReport(guests, batchId);
+    const html = this.buildBulkReportHTML(guests, batchId);
+    return this.generatePDF(html);
   }
 
   // Generate daily arrival report
   async generateDailyReport(guests, date) {
-    return new Promise((resolve, reject) => {
-      try {
-        const doc = new PDFDocument({ margin: 40, size: 'A4' });
-        const chunks = [];
+    const html = this.buildDailyReportHTML(guests, date);
+    return this.generatePDF(html);
+  }
 
-        doc.on('data', chunk => chunks.push(chunk));
-        doc.on('end', () => resolve(Buffer.concat(chunks)));
-        doc.on('error', reject);
+  async generatePDF(html) {
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '20mm', right: '15mm', bottom: '20mm', left: '15mm' }
+    });
+    await page.close();
+    return pdf;
+  }
 
-        // Header
-        this.addHeader(doc, `VIP Gastenoverzicht`);
-
-        doc.fontSize(12)
-          .fillColor(this.lightGray)
-          .text(`Datum: ${date}`, 40, 90)
-          .text(`Aantal gasten: ${guests.length}`, 40, 105);
-
-        doc.moveDown(2);
-
-        // Summary table
-        this.addSummaryTable(doc, guests);
-
-        // Individual guest profiles
-        for (let i = 0; i < guests.length; i++) {
-          const guest = guests[i];
-
-          // Add page break if needed
-          if (doc.y > 650) {
-            doc.addPage();
-          }
-
-          this.addGuestCard(doc, guest, i + 1);
+  getStyles() {
+    return `
+      <style>
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap');
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+          font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+          color: #2d3748;
+          line-height: 1.6;
+          background: #fff;
         }
-
-        // Footer on last page
-        doc.fontSize(8)
-          .fillColor(this.lightGray)
-          .text(
-            `Gegenereerd op ${new Date().toLocaleDateString('nl-NL')} om ${new Date().toLocaleTimeString('nl-NL')}`,
-            40,
-            doc.page.height - 50,
-            { align: 'center' }
-          );
-
-        doc.end();
-      } catch (error) {
-        reject(error);
-      }
-    });
+        
+        .header {
+          background: linear-gradient(135deg, #1a365d 0%, #2c5282 100%);
+          color: white;
+          padding: 30px 40px;
+          position: relative;
+          overflow: hidden;
+        }
+        
+        .header::before {
+          content: '';
+          position: absolute;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          width: 150px;
+          background: linear-gradient(135deg, transparent 0%, rgba(201, 162, 39, 0.3) 100%);
+        }
+        
+        .header h1 {
+          font-family: 'Playfair Display', serif;
+          font-size: 28px;
+          font-weight: 600;
+          margin-bottom: 5px;
+        }
+        
+        .header .subtitle {
+          font-size: 12px;
+          opacity: 0.8;
+          text-transform: uppercase;
+          letter-spacing: 2px;
+        }
+        
+        .gold-bar {
+          height: 4px;
+          background: linear-gradient(90deg, #c9a227, #d4af37, #c9a227);
+        }
+        
+        .content { padding: 30px 40px; }
+        
+        .summary-box {
+          background: #f7fafc;
+          border-left: 4px solid #c9a227;
+          padding: 20px;
+          margin-bottom: 30px;
+          border-radius: 0 8px 8px 0;
+        }
+        
+        .summary-box h3 {
+          font-family: 'Playfair Display', serif;
+          color: #1a365d;
+          font-size: 16px;
+          margin-bottom: 10px;
+        }
+        
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 15px;
+          margin-bottom: 30px;
+        }
+        
+        .stat-card {
+          background: #f7fafc;
+          padding: 15px;
+          border-radius: 8px;
+          text-align: center;
+        }
+        
+        .stat-value {
+          font-size: 28px;
+          font-weight: 700;
+          color: #1a365d;
+        }
+        
+        .stat-label {
+          font-size: 11px;
+          color: #718096;
+          text-transform: uppercase;
+        }
+        
+        .guest-card {
+          background: #fff;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          margin-bottom: 20px;
+          overflow: hidden;
+          page-break-inside: avoid;
+        }
+        
+        .guest-card-header {
+          display: flex;
+          align-items: center;
+          padding: 20px;
+          background: #f8fafc;
+          border-bottom: 1px solid #e2e8f0;
+        }
+        
+        .guest-avatar {
+          width: 60px;
+          height: 60px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, #1a365d, #2c5282);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: white;
+          font-size: 20px;
+          font-weight: 600;
+          margin-right: 15px;
+          flex-shrink: 0;
+        }
+        
+        .guest-avatar img {
+          width: 100%;
+          height: 100%;
+          border-radius: 50%;
+          object-fit: cover;
+        }
+        
+        .guest-info h3 {
+          font-family: 'Playfair Display', serif;
+          font-size: 18px;
+          color: #1a365d;
+          margin-bottom: 4px;
+        }
+        
+        .guest-info .title {
+          font-size: 13px;
+          color: #4a5568;
+        }
+        
+        .guest-info .meta {
+          font-size: 11px;
+          color: #718096;
+          margin-top: 4px;
+        }
+        
+        .vip-score {
+          margin-left: auto;
+          text-align: center;
+        }
+        
+        .vip-score .score {
+          font-size: 24px;
+          font-weight: 700;
+        }
+        
+        .vip-score .label {
+          font-size: 10px;
+          color: #718096;
+          text-transform: uppercase;
+        }
+        
+        .vip-high { color: #48bb78; }
+        .vip-medium { color: #ecc94b; }
+        .vip-low { color: #fc8181; }
+        
+        .guest-card-body { padding: 20px; }
+        
+        .info-grid {
+          display: grid;
+          grid-template-columns: repeat(2, 1fr);
+          gap: 15px;
+        }
+        
+        .info-item {
+          font-size: 12px;
+        }
+        
+        .info-label {
+          color: #718096;
+          font-weight: 500;
+          margin-bottom: 2px;
+        }
+        
+        .info-value {
+          color: #2d3748;
+        }
+        
+        .notable-info {
+          background: #fffbeb;
+          border-left: 3px solid #c9a227;
+          padding: 12px 15px;
+          margin-top: 15px;
+          border-radius: 0 8px 8px 0;
+          font-size: 12px;
+        }
+        
+        .social-links {
+          display: flex;
+          gap: 8px;
+          margin-top: 10px;
+        }
+        
+        .social-link {
+          display: inline-block;
+          padding: 4px 10px;
+          background: #edf2f7;
+          border-radius: 4px;
+          font-size: 10px;
+          color: #4a5568;
+          text-decoration: none;
+        }
+        
+        .table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 11px;
+          margin-bottom: 30px;
+        }
+        
+        .table th {
+          background: #1a365d;
+          color: white;
+          padding: 12px 10px;
+          text-align: left;
+          font-weight: 500;
+        }
+        
+        .table td {
+          padding: 10px;
+          border-bottom: 1px solid #e2e8f0;
+        }
+        
+        .table tr:nth-child(even) { background: #f7fafc; }
+        
+        .footer {
+          text-align: center;
+          padding: 20px;
+          font-size: 10px;
+          color: #a0aec0;
+          border-top: 1px solid #e2e8f0;
+        }
+        
+        .page-break { page-break-before: always; }
+      </style>
+    `;
   }
 
-  addHeader(doc, title) {
-    // Gold accent bar
-    doc.rect(0, 0, doc.page.width, 8)
-      .fill(this.accentColor);
+  buildGuestReportHTML(guest, research, reservations, suggestions) {
+    const vipScore = research?.vip_score || 0;
+    const vipClass = vipScore >= 8 ? 'vip-high' : vipScore >= 5 ? 'vip-medium' : 'vip-low';
+    const initials = (guest.full_name || 'G').split(' ').map(n => n[0]).join('').substring(0, 2);
 
-    // Title
-    doc.fontSize(24)
-      .fillColor(this.primaryColor)
-      .font('Helvetica-Bold')
-      .text(title, 40, 30);
-
-    // Subtitle
-    doc.fontSize(10)
-      .fillColor(this.lightGray)
-      .font('Helvetica')
-      .text('La Réserve - VIP Research Tool', 40, 60);
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        ${this.getStyles()}
+      </head>
+      <body>
+        <div class="header">
+          <h1>${guest.full_name || 'Onbekende Gast'}</h1>
+          <div class="subtitle">VIP Gastprofiel</div>
+        </div>
+        <div class="gold-bar"></div>
+        
+        <div class="content">
+          <div class="guest-card">
+            <div class="guest-card-header">
+              <div class="guest-avatar">
+                ${research?.profile_photo_url
+        ? `<img src="${research.profile_photo_url}" alt="${guest.full_name}">`
+        : initials}
+              </div>
+              <div class="guest-info">
+                <h3>${guest.full_name}</h3>
+                <div class="title">${research?.job_title || guest.company || '-'}</div>
+                <div class="meta">${guest.country || ''} ${guest.email ? `• ${guest.email}` : ''}</div>
+              </div>
+              <div class="vip-score">
+                <div class="score ${vipClass}">${vipScore}/10</div>
+                <div class="label">VIP Score</div>
+              </div>
+            </div>
+            <div class="guest-card-body">
+              <div class="info-grid">
+                <div class="info-item">
+                  <div class="info-label">Industrie</div>
+                  <div class="info-value">${research?.industry || '-'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Invloedsniveau</div>
+                  <div class="info-value">${research?.influence_level || '-'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Bedrijf</div>
+                  <div class="info-value">${research?.research_company || guest.company || '-'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Verblijven</div>
+                  <div class="info-value">${guest.total_stays || 1}x</div>
+                </div>
+              </div>
+              ${research?.notable_info ? `
+                <div class="notable-info">
+                  <strong>Opmerkelijke informatie:</strong><br>
+                  ${research.notable_info}
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        </div>
+        
+        <div class="footer">
+          Gegenereerd door VIP Guest Research Tool op ${new Date().toLocaleDateString('nl-NL')}
+        </div>
+      </body>
+      </html>
+    `;
   }
 
-  addGuestInfo(doc, guest, research) {
-    const y = 130;
-
-    doc.fontSize(16)
-      .fillColor(this.primaryColor)
-      .font('Helvetica-Bold')
-      .text(guest.full_name || 'Onbekende gast', 40, y);
-
-    let infoY = y + 25;
-
-    if (research?.job_title) {
-      doc.fontSize(11)
-        .fillColor(this.textColor)
-        .font('Helvetica')
-        .text(research.job_title, 40, infoY);
-      infoY += 18;
-    }
-
-    if (research?.research_company || guest.company) {
-      doc.fontSize(10)
-        .fillColor(this.lightGray)
-        .text(research?.research_company || guest.company, 40, infoY);
-      infoY += 18;
-    }
-
-    if (guest.country) {
-      doc.fontSize(10)
-        .fillColor(this.lightGray)
-        .text(`📍 ${guest.country}`, 40, infoY);
-      infoY += 18;
-    }
-
-    // VIP Score badge
-    if (research?.vip_score) {
-      const score = research.vip_score;
-      const badgeColor = score >= 8 ? '#48bb78' : score >= 5 ? '#ecc94b' : '#fc8181';
-
-      doc.rect(doc.page.width - 100, y, 60, 30)
-        .fill(badgeColor);
-
-      doc.fontSize(16)
-        .fillColor('#ffffff')
-        .font('Helvetica-Bold')
-        .text(`${score}/10`, doc.page.width - 95, y + 8);
-    }
-
-    doc.moveDown(2);
+  buildBulkReportHTML(guests, batchId) {
+    return this.buildDailyReportHTML(guests, batchId);
   }
 
-  addResearchSection(doc, research) {
-    const startY = doc.y + 20;
-
-    doc.fontSize(14)
-      .fillColor(this.primaryColor)
-      .font('Helvetica-Bold')
-      .text('Onderzoeksresultaten', 40, startY);
-
-    let y = startY + 25;
-
-    // Industry
-    if (research.industry) {
-      y = this.addInfoRow(doc, 'Industrie', research.industry, y);
-    }
-
-    // Influence level
-    if (research.influence_level) {
-      y = this.addInfoRow(doc, 'Invloedsniveau', research.influence_level, y);
-    }
-
-    // LinkedIn
-    if (research.linkedin_url) {
-      y = this.addInfoRow(doc, 'LinkedIn', research.linkedin_url, y);
-    }
-
-    // Notable info
-    if (research.notable_info) {
-      doc.fontSize(12)
-        .fillColor(this.primaryColor)
-        .font('Helvetica-Bold')
-        .text('Opmerkelijke informatie:', 40, y + 10);
-
-      doc.fontSize(10)
-        .fillColor(this.textColor)
-        .font('Helvetica')
-        .text(research.notable_info, 40, y + 28, { width: 500 });
-    }
-
-    doc.moveDown(2);
-  }
-
-  addReservationsSection(doc, reservations) {
-    if (doc.y > 600) doc.addPage();
-
-    const startY = doc.y + 20;
-
-    doc.fontSize(14)
-      .fillColor(this.primaryColor)
-      .font('Helvetica-Bold')
-      .text('Reserveringsgeschiedenis', 40, startY);
-
-    let y = startY + 25;
-
-    for (const res of reservations.slice(0, 5)) {
-      doc.fontSize(10)
-        .fillColor(this.textColor)
-        .font('Helvetica')
-        .text(`${res.check_in_date} - ${res.check_out_date}`, 40, y);
-
-      if (res.room_number) {
-        doc.text(`Kamer: ${res.room_number}`, 200, y);
-      }
-      y += 18;
-    }
-  }
-
-  addInfoRow(doc, label, value, y) {
-    doc.fontSize(10)
-      .fillColor(this.lightGray)
-      .font('Helvetica-Bold')
-      .text(`${label}:`, 40, y);
-
-    doc.fontSize(10)
-      .fillColor(this.textColor)
-      .font('Helvetica')
-      .text(value, 140, y, { width: 400 });
-
-    return y + 18;
-  }
-
-  addSummaryTable(doc, guests) {
-    const startY = doc.y;
-    const colWidths = [30, 150, 120, 80, 70, 60];
-    const headers = ['#', 'Naam', 'Functie', 'Bedrijf', 'Land', 'VIP'];
-
-    // Header row
-    doc.rect(40, startY, 515, 25)
-      .fill(this.primaryColor);
-
-    let x = 45;
-    doc.fontSize(9)
-      .fillColor('#ffffff')
-      .font('Helvetica-Bold');
-
-    headers.forEach((header, i) => {
-      doc.text(header, x, startY + 8);
-      x += colWidths[i];
-    });
-
-    // Data rows
-    let y = startY + 25;
+  buildDailyReportHTML(guests, date) {
     const vipGuests = guests.filter(g => g.vip_score >= 7);
-    const displayGuests = vipGuests.length > 0 ? vipGuests.slice(0, 10) : guests.slice(0, 10);
+    const highVip = guests.filter(g => g.vip_score >= 8).length;
+    const medVip = guests.filter(g => g.vip_score >= 5 && g.vip_score < 8).length;
 
-    displayGuests.forEach((guest, index) => {
-      const isEven = index % 2 === 0;
-      doc.rect(40, y, 515, 22)
-        .fill(isEven ? '#f7fafc' : '#ffffff');
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        ${this.getStyles()}
+      </head>
+      <body>
+        <div class="header">
+          <h1>VIP Gastenoverzicht</h1>
+          <div class="subtitle">La Réserve • ${date}</div>
+        </div>
+        <div class="gold-bar"></div>
+        
+        <div class="content">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-value">${guests.length}</div>
+              <div class="stat-label">Totaal Gasten</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value vip-high">${highVip}</div>
+              <div class="stat-label">High VIP (8+)</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value vip-medium">${medVip}</div>
+              <div class="stat-label">Medium VIP</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">${vipGuests.length}</div>
+              <div class="stat-label">Aandacht nodig</div>
+            </div>
+          </div>
 
-      x = 45;
-      doc.fontSize(8)
-        .fillColor(this.textColor)
-        .font('Helvetica');
+          <table class="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Naam</th>
+                <th>Functie</th>
+                <th>Bedrijf</th>
+                <th>Land</th>
+                <th>VIP</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${guests.map((g, i) => {
+      const vipClass = g.vip_score >= 8 ? 'vip-high' : g.vip_score >= 5 ? 'vip-medium' : 'vip-low';
+      return `
+                  <tr>
+                    <td>${i + 1}</td>
+                    <td><strong>${g.full_name || '-'}</strong></td>
+                    <td>${(g.job_title || '-').substring(0, 30)}</td>
+                    <td>${(g.research_company || g.company || '-').substring(0, 25)}</td>
+                    <td>${g.country || '-'}</td>
+                    <td class="${vipClass}"><strong>${g.vip_score || '-'}/10</strong></td>
+                  </tr>
+                `;
+    }).join('')}
+            </tbody>
+          </table>
 
-      const rowData = [
-        (index + 1).toString(),
-        (guest.full_name || '').substring(0, 25),
-        (guest.job_title || '-').substring(0, 20),
-        (guest.research_company || guest.company || '-').substring(0, 15),
-        (guest.country || '-').substring(0, 12),
-        guest.vip_score ? `${guest.vip_score}/10` : '-'
-      ];
+          ${guests.slice(0, 20).map((guest, index) => {
+      const initials = (guest.full_name || 'G').split(' ').map(n => n[0]).join('').substring(0, 2);
+      const vipScore = guest.vip_score || 0;
+      const vipClass = vipScore >= 8 ? 'vip-high' : vipScore >= 5 ? 'vip-medium' : 'vip-low';
 
-      rowData.forEach((data, i) => {
-        doc.text(data, x, y + 6);
-        x += colWidths[i];
-      });
+      let fullReport = null;
+      try {
+        fullReport = typeof guest.full_report === 'string' ? JSON.parse(guest.full_report) : guest.full_report;
+      } catch (e) { }
 
-      y += 22;
-    });
+      const summary = fullReport?.managementSummary || guest.notable_info || '';
 
-    if (guests.length > 10) {
-      doc.fontSize(9)
-        .fillColor(this.lightGray)
-        .text(`... en ${guests.length - 10} meer gasten`, 40, y + 5);
-    }
-
-    doc.y = y + 30;
-  }
-
-  addGuestCard(doc, guest, index) {
-    const startY = doc.y + 10;
-    const cardHeight = 100;
-
-    // Card background
-    doc.rect(40, startY, 515, cardHeight)
-      .fill('#f8f9fa')
-      .stroke('#e2e8f0');
-
-    // VIP Score indicator
-    const score = guest.vip_score || 0;
-    const scoreColor = score >= 8 ? '#48bb78' : score >= 5 ? '#ecc94b' : '#e53e3e';
-    doc.rect(40, startY, 5, cardHeight)
-      .fill(scoreColor);
-
-    // Guest name and number
-    doc.fontSize(12)
-      .fillColor(this.primaryColor)
-      .font('Helvetica-Bold')
-      .text(`${index}. ${guest.full_name || 'Onbekende gast'}`, 55, startY + 10);
-
-    // VIP badge
-    doc.fontSize(10)
-      .fillColor(scoreColor)
-      .font('Helvetica-Bold')
-      .text(`VIP: ${score}/10`, 480, startY + 10);
-
-    // Job title & company
-    const subtitle = [guest.job_title, guest.research_company || guest.company]
-      .filter(Boolean)
-      .join(' bij ');
-
-    if (subtitle) {
-      doc.fontSize(10)
-        .fillColor(this.textColor)
-        .font('Helvetica')
-        .text(subtitle.substring(0, 70), 55, startY + 28);
-    }
-
-    // Country and industry
-    const details = [guest.country, guest.industry].filter(Boolean).join(' • ');
-    if (details) {
-      doc.fontSize(9)
-        .fillColor(this.lightGray)
-        .text(details, 55, startY + 45);
-    }
-
-    // Notable info (truncated)
-    if (guest.notable_info) {
-      const truncated = guest.notable_info.substring(0, 150) +
-        (guest.notable_info.length > 150 ? '...' : '');
-      doc.fontSize(8)
-        .fillColor(this.textColor)
-        .text(truncated, 55, startY + 62, { width: 480 });
-    }
-
-    doc.y = startY + cardHeight + 5;
+      return `
+              <div class="guest-card" ${index > 0 && index % 3 === 0 ? 'style="page-break-before: always;"' : ''}>
+                <div class="guest-card-header">
+                  <div class="guest-avatar">
+                    ${guest.profile_photo_url
+          ? `<img src="${guest.profile_photo_url}" alt="${guest.full_name}">`
+          : initials}
+                  </div>
+                  <div class="guest-info">
+                    <h3>${guest.full_name || 'Onbekende Gast'}</h3>
+                    <div class="title">${guest.job_title || '-'} ${guest.research_company || guest.company ? `bij ${guest.research_company || guest.company}` : ''}</div>
+                    <div class="meta">${guest.country || ''} ${guest.industry ? `• ${guest.industry}` : ''}</div>
+                  </div>
+                  <div class="vip-score">
+                    <div class="score ${vipClass}">${vipScore}/10</div>
+                    <div class="label">VIP Score</div>
+                  </div>
+                </div>
+                ${summary ? `
+                  <div class="guest-card-body">
+                    <div class="notable-info">
+                      ${summary.substring(0, 300)}${summary.length > 300 ? '...' : ''}
+                    </div>
+                  </div>
+                ` : ''}
+              </div>
+            `;
+    }).join('')}
+        </div>
+        
+        <div class="footer">
+          Gegenereerd door VIP Guest Research Tool op ${new Date().toLocaleDateString('nl-NL')} om ${new Date().toLocaleTimeString('nl-NL')}
+        </div>
+      </body>
+      </html>
+    `;
   }
 }
 
