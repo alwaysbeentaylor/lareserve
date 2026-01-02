@@ -115,25 +115,43 @@ class GoogleSearchService {
                 timeout: 30000
             });
 
-            // Wait for results
-            await page.waitForSelector('#search', { timeout: 10000 }).catch(() => { });
+            // Handle Cookie Consent if present
+            try {
+                const buttons = await page.$$('button');
+                for (const button of buttons) {
+                    const text = await page.evaluate(el => el.textContent, button);
+                    if (text.includes('Alles accepteren') || text.includes('Accept all') || text.includes('Ik ga akkoord')) {
+                        await button.click();
+                        await page.waitForNavigation({ waitUntil: 'networkidle2' });
+                        break;
+                    }
+                }
+            } catch (e) {
+                // Ignore if no consent page
+            }
+
+            // Wait for results with a more flexible selector
+            await page.waitForSelector('#search, #topstuff, .g', { timeout: 10000 }).catch(() => { });
 
             // Extract search results
             const searchResults = await page.evaluate(() => {
                 const items = [];
-                const resultElements = document.querySelectorAll('#search .g');
+                // More robust selectors for organic results
+                const resultElements = document.querySelectorAll('div.g, div.v7W49e > div, div.srK7ed');
 
                 resultElements.forEach((el, index) => {
                     if (index < 10) {
                         const titleEl = el.querySelector('h3');
                         const linkEl = el.querySelector('a');
-                        const snippetEl = el.querySelector('[data-sncf], [style*="line-height"]');
+                        const snippetEl = el.querySelector('div[style*="webkit-line-clamp"], [data-sncf], .VwiC3b');
 
-                        items.push({
-                            title: titleEl?.textContent || '',
-                            link: linkEl?.href || '',
-                            snippet: snippetEl?.textContent || ''
-                        });
+                        const title = titleEl?.textContent || '';
+                        const link = linkEl?.href || '';
+                        const snippet = snippetEl?.textContent || '';
+
+                        if (title && link) {
+                            items.push({ title, link, snippet });
+                        }
                     }
                 });
 

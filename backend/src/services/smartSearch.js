@@ -1,8 +1,26 @@
 const OpenAI = require('openai');
 const companyScraper = require('./companyScraper');
+const knowledgeGraph = require('./knowledgeGraph');
+const duckDuckGo = require('./duckDuckGo');
+const braveSearch = require('./braveSearch');
 
 /**
- * Smart Search service for guest research
+ * Format large numbers to human-readable format (e.g. 18K, 1.2M)
+ */
+function formatNumber(num) {
+    if (!num || isNaN(num)) return null;
+    if (num >= 1000000) {
+        return (num / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+    }
+    if (num >= 1000) {
+        return (num / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+    }
+    return num.toString();
+}
+
+/**
+ * Smart Search Service
+ * for guest research
  * Focuses on LinkedIn as primary source via SerpAPI
  */
 
@@ -39,115 +57,425 @@ class SmartSearchService {
         }
     }
 
-    /**
-     * Search for LinkedIn profile using SerpAPI (Google Search)
-     * Returns all candidates for manual selection if multiple found
-     */
     async searchLinkedIn(guest) {
-        if (!process.env.SERPAPI_KEY) {
-            console.log('SerpAPI not configured, skipping LinkedIn search');
-            return { candidates: [], bestMatch: null, needsReview: false };
-        }
-
+        console.log(`🔍 LinkedIn search for ${guest.full_name} via Brave/DuckDuckGo...`);
         try {
-            // 1. Initial Strict Search (Name + Company)
+            // Try Name + Company first
             let query = `site:linkedin.com/in "${guest.full_name}"`;
             if (guest.company) query += ` "${guest.company}"`;
             if (guest.country) query += ` ${guest.country}`;
 
-            let candidates = await this.performSerpApiSearch(query, guest.full_name);
+            let candidates = [];
 
-            // 2. If no strict match, try Name + Country (no company)
-            if (candidates.length === 0 && guest.company) {
-                console.log(`🔍 Strict search failed, trying broader search for ${guest.full_name}`);
-                query = `site:linkedin.com/in "${guest.full_name}"`;
-                if (guest.country) query += ` ${guest.country}`;
-                candidates = await this.performSerpApiSearch(query, guest.full_name);
+            // Hybrid Strategy: Search both Brave and DuckDuckGo to maximize coverage
+            const countryISO = guest.country === 'Belgium' ? 'BE' : (guest.country === 'Netherlands' ? 'NL' : null);
+
+            console.log(`🦁 Searching Brave for LinkedIn...`);
+            let braveResults = await braveSearch.search(query, 5, countryISO);
+
+            // Fuzzy Fallback for Brave
+            if (braveResults.length < 2) {
+                const fuzzyQuery = `site:linkedin.com/in ${guest.full_name} ${guest.country || ''} ${guest.company || ''}`.trim();
+                const fuzzyBrave = await braveSearch.search(fuzzyQuery, 5, countryISO);
+                braveResults = [...braveResults, ...fuzzyBrave];
             }
 
-            // 3. If still no candidates, try Name alone but with focus on the person
-            if (candidates.length === 0) {
-                console.log(`🔍 Broader search failed, trying namespaced search for ${guest.full_name}`);
-                query = `site:linkedin.com/in "${guest.full_name}"`;
-                candidates = await this.performSerpApiSearch(query, guest.full_name);
+            console.log(`🦆 Searching DuckDuckGo for LinkedIn...`);
+            const ddgResults = await duckDuckGo.search(query, 5);
+
+            // Combine and de-duplicate by link
+            const combinedMap = new Map();
+            [...braveResults, ...ddgResults].forEach(r => {
+                if (r.link && !combinedMap.has(r.link)) {
+                    combinedMap.set(r.link, r);
+                }
+            });
+
+            candidates = Array.from(combinedMap.values());
+            console.log(`📋 Found ${candidates.length} unique LinkedIn candidate(s) via Hybrid search`);
+
+            // If still no candidates, try a broader fallback
+            if (candidates.length === 0 && (guest.company || guest.country)) {
+                console.log(`🔍 Broadening LinkedIn search for ${guest.full_name}...`);
+                const broadQuery = `site:linkedin.com/in "${guest.full_name}" ${guest.country || ''}`.trim();
+
+                const broadResults = await braveSearch.search(broadQuery, 5, countryISO);
+                const broadDDG = await duckDuckGo.search(broadQuery, 3);
+
+                [...broadResults, ...broadDDG].forEach(r => {
+                    if (r.link && !combinedMap.has(r.link)) {
+                        combinedMap.set(r.link, r);
+                    }
+                });
+                candidates = Array.from(combinedMap.values());
             }
 
-            console.log(`📋 Found ${candidates.length} LinkedIn candidate(s)`);
+            if (candidates.length > 0) {
+                console.log(`📋 Found ${candidates.length} LinkedIn candidate(s)`);
 
-            if (candidates.length === 0) {
-                return { candidates: [], bestMatch: null, needsReview: false };
+                // NEW: Parse job title and company from LinkedIn search result title
+                // Format: "Name - Job Title bij/at Company | LinkedIn"
+                for (const candidate of candidates) {
+                    if (candidate.title && candidate.link?.includes('linkedin.com/in/')) {
+                        const parsed = this.parseLinkedInTitle(candidate.title, guest.full_name);
+                        if (parsed) {
+                            candidate.extractedJobTitle = parsed.jobTitle;
+                            candidate.extractedCompany = parsed.company;
+                            console.log(`💼 Extracted from LinkedIn title: ${parsed.jobTitle} @ ${parsed.company}`);
+                        }
+                    }
+                }
+
+                const verifiedResults = await this.verifyCandidatesWithAI(guest, candidates);
+                return verifiedResults;
             }
-
-            // 4. Verify candidates with AI for better accuracy
-            const verifiedResults = await this.verifyCandidatesWithAI(guest, candidates);
-
-            return verifiedResults;
         } catch (error) {
-            console.error('SerpAPI LinkedIn search error:', error);
-            return { candidates: [], bestMatch: null, needsReview: false };
+            console.error('LinkedIn search error:', error.message);
+        }
+
+        return { candidates: [], bestMatch: null, needsReview: false };
+    }
+
+    /**
+     * Parse LinkedIn search result title to extract job title and company
+     * Example: "Maxim Van Trimpont - Front Office Manager bij La Réserve Resort | LinkedIn"
+     * Returns: { jobTitle: "Front Office Manager", company: "La Réserve Resort" }
+     */
+    parseLinkedInTitle(title, guestName) {
+        if (!title) return null;
+
+        // Remove "| LinkedIn" suffix
+        let cleanTitle = title.replace(/\s*\|\s*LinkedIn.*$/i, '').trim();
+
+        // Try to split by " - " to separate name from role
+        const parts = cleanTitle.split(' - ');
+        if (parts.length < 2) return null;
+
+        // The first part should contain the name, rest is job info
+        const jobPart = parts.slice(1).join(' - ').trim();
+        if (!jobPart) return null;
+
+        // Try to split job part by "bij", "at", "@" to get company
+        const companyMatch = jobPart.match(/^(.+?)\s+(?:bij|at|@)\s+(.+)$/i);
+        if (companyMatch) {
+            let potentialCompany = companyMatch[2].trim();
+
+            // Filter out "LinkedIn" and common locations as company names
+            if (potentialCompany.toLowerCase().includes('linkedin') ||
+                potentialCompany.match(/(Region|Area|Belgium|Netherlands|France|United Kingdom|USA)/i)) {
+                return {
+                    jobTitle: jobPart, // Fallback to full string if company detection is dubious
+                    company: null
+                };
+            }
+
+            return {
+                jobTitle: companyMatch[1].trim(),
+                company: potentialCompany
+            };
+        }
+
+        // If no company separator found, the whole thing is the job title
+        return {
+            jobTitle: jobPart,
+            company: null
+        };
+    }
+
+    /**
+     * Extract company information from email domain
+     * Determines if guest is owner or employee based on company size and role
+     */
+    async extractCompanyFromEmail(guest) {
+        if (!guest.email) return null;
+
+        // Extract domain from email
+        const emailParts = guest.email.split('@');
+        if (emailParts.length !== 2) return null;
+
+        const domain = emailParts[1].toLowerCase();
+
+        // Skip common personal email domains
+        const personalDomains = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com', 'live.com', 'msn.com', 'me.com', 'mail.com', 'protonmail.com'];
+        if (personalDomains.includes(domain)) {
+            console.log(`📧 Skipping personal email domain: ${domain}`);
+            return null;
+        }
+
+        console.log(`📧 Analyzing business email domain: ${domain}`);
+
+        try {
+            // Step 1: Search for the company via Brave (fallback to DuckDuckGo)
+            let companyResults = await braveSearch.search(`"${domain}" bedrijf company`, 5);
+            if (companyResults.length === 0) {
+                // Fallback to DuckDuckGo
+                companyResults = await duckDuckGo.search(`"${domain}" bedrijf company`);
+            }
+
+            // Step 2: Scrape the company website directly
+            const websiteUrl = `https://${domain}`;
+            const websiteContent = await duckDuckGo.fetchPageContent(websiteUrl);
+
+            if (!websiteContent && companyResults.length === 0) {
+                console.log(`❌ No company info found for domain: ${domain}`);
+                return null;
+            }
+
+            // Step 3: Use AI to analyze and determine owner/employee status
+            const openai = this.getOpenAI();
+            if (!openai) return { domain, websiteUrl, companyName: domain.split('.')[0] };
+
+            const prompt = `Analyze this company information to determine:
+1. The official company name
+2. What industry/sector they operate in
+3. Company size estimate (Micro/Klein/Middelgroot/Groot)
+4. Whether "${guest.full_name}" is likely the OWNER/FOUNDER or an EMPLOYEE
+
+GUEST INFO:
+- Name: ${guest.full_name}
+- Email: ${guest.email}
+- Country: ${guest.country || 'Unknown'}
+
+EMAIL DOMAIN: ${domain}
+WEBSITE URL: ${websiteUrl}
+
+${websiteContent ? `WEBSITE CONTENT:
+${websiteContent.substring(0, 2000)}` : ''}
+
+${companyResults.length > 0 ? `SEARCH RESULTS:
+${companyResults.slice(0, 3).map(r => `- ${r.title}: ${r.snippet}`).join('\n')}` : ''}
+
+OWNER INDICATORS (look for these):
+- Name appears as founder/CEO/director on website
+- Very small company (1-10 employees)
+- Name matches company name pattern
+- Mentioned in "about us" or "team" as leadership
+
+Return JSON:
+{
+  "companyName": "Official company name",
+  "industry": "Industry/sector",
+  "companySize": "Micro/Klein/Middelgroot/Groot",
+  "isOwner": true/false/null,
+  "ownerConfidence": 0-1,
+  "ownerReason": "Why you think owner or employee",
+  "description": "Brief company description"
+}`;
+
+            const response = await openai.chat.completions.create({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: 'You are a business analyst. Determine company details and ownership status from available data.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.1,
+                response_format: { type: "json_object" }
+            });
+
+            const result = JSON.parse(response.choices[0].message.content);
+            console.log(`🏢 Email domain analysis: ${result.companyName} (${result.companySize}) - ${result.isOwner ? '👑 OWNER' : '👔 Employee'}`);
+
+            return {
+                domain,
+                websiteUrl,
+                ...result,
+                source: 'email_domain'
+            };
+        } catch (error) {
+            console.error('Email domain analysis error:', error.message);
+            return { domain, websiteUrl: `https://${domain}`, companyName: domain.split('.')[0] };
         }
     }
 
     /**
-     * Helper to perform the actual SerpAPI search
+     * PRIMARY AI-Powered Search (Free-First Strategy)
+     * Uses multi-query DuckDuckGo search with deep page scraping for rich data
+     * Only falls back to SerpAPI if confidence is too low
      */
-    async performSerpApiSearch(query, guestName) {
-        const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY}&num=8`;
-        const response = await this.fetchWithTimeout(url);
-        const data = await response.json();
+    async searchWithAI(guest) {
+        console.log(`🧠 AI Research Engine: Starting intelligent hybrid search for ${guest.full_name}...`);
 
-        if (data.error) {
-            console.error('SerpAPI error:', data.error);
-            return [];
+        try {
+            // STEP 1: Hybrid Multi-query Search (Brave + DuckDuckGo)
+            // We search BOTH because Brave's index can be stale for certain profiles (like LinkedIn)
+            const countryISO = guest.country === 'Belgium' ? 'BE' : (guest.country === 'Netherlands' ? 'NL' : null);
+
+            console.log(`🦁 Searching Brave...`);
+            const braveResults = await braveSearch.multiSearch(guest, countryISO);
+
+            console.log(`🦆 Searching DuckDuckGo...`);
+            const ddgResults = await duckDuckGo.multiSearch(guest);
+
+            // Combine and de-duplicate
+            const combinedMap = new Map();
+            [...braveResults, ...ddgResults].forEach(r => {
+                if (r.link && !combinedMap.has(r.link)) {
+                    combinedMap.set(r.link, r);
+                }
+            });
+
+            let searchResults = Array.from(combinedMap.values());
+
+            if (searchResults.length === 0) {
+                console.log('❌ No results from any search engine');
+                return null;
+            }
+
+            console.log(`🔍 Combined ${searchResults.length} unique results for AI evaluation`);
+
+            // Step 2: AI selects the best match with confidence score
+            let aiSelection = await this.selectBestMatchWithAI(guest, searchResults);
+
+            // ITERATIVE RETRY: If no confident match found, or to double-check a suspicious result
+            if ((!aiSelection || (aiSelection.confidence < 0.9)) && guest.country) {
+                console.log(`🔄 No confident match for ${guest.full_name}. Retrying with strict country focus: ${guest.country}`);
+                const focusedQuery = `"${guest.full_name}" ${guest.country} professional profile`;
+
+                const retryBrave = await braveSearch.search(focusedQuery, 5, countryISO);
+                const retryDDG = await duckDuckGo.search(focusedQuery, 5);
+
+                const retryResults = [...retryBrave, ...retryDDG].filter(r => !combinedMap.has(r.link));
+
+                if (retryResults.length > 0) {
+                    // Evaluate new results combined with old ones
+                    const combinedResultsList = [...searchResults, ...retryResults];
+                    const newSelection = await this.selectBestMatchWithAI(guest, combinedResultsList);
+
+                    if (newSelection && (!aiSelection || newSelection.confidence >= aiSelection.confidence)) {
+                        aiSelection = newSelection;
+                    }
+                }
+            }
+
+            if (!aiSelection) {
+                console.log('🤔 AI could not identify a confident match');
+                return null;
+            }
+
+            // Step 3: Deep scrape the identified page for richer content
+            if (aiSelection.url && !aiSelection.url.includes('linkedin.com')) {
+                const deepContent = await duckDuckGo.fetchPageContent(aiSelection.url, 8000);
+                if (deepContent) {
+                    aiSelection.deepContent = deepContent;
+                    console.log(`📄 Deep scraped ${aiSelection.url.substring(0, 50)}... (${deepContent.length} chars)`);
+                }
+            }
+
+            return aiSelection;
+        } catch (error) {
+            console.error('AI Research error:', error);
+            return null;
         }
+    }
 
-        const linkedinResults = data.organic_results?.filter(r =>
-            r.link?.includes('linkedin.com/in/')
-        ) || [];
+    /**
+     * Legacy fallback (kept for backwards compatibility)
+     * Now just calls the new AI-powered search
+     */
+    async searchGoogleFallback(guest) {
+        return await this.searchWithAI(guest);
+    }
 
-        // Stricter filtering: Name must be present in title or snippet
-        const nameParts = guestName.toLowerCase()
-            .split(/[^a-z0-9]+/i)
-            .filter(part => part.length > 2); // Only count parts longer than 2 chars to avoid common initials/prepositions
+    /**
+     * Use AI to select the most likely match from general Google snippets
+     */
+    async selectBestMatchWithAI(guest, searchResults) {
+        const openai = this.getOpenAI();
+        if (!openai) return null;
 
-        return linkedinResults
-            .filter(result => {
-                const text = (result.title + ' ' + result.snippet).toLowerCase();
-                // Check if important parts of the name are present
-                if (nameParts.length === 0) return true; // Fallback for very short names
+        try {
+            const resultsInfo = searchResults.map((r, i) =>
+                `Result ${i}:
+                Title: ${r.title}
+                URL: ${r.link}
+                Snippet: ${r.snippet}`
+            ).join('\n\n');
 
-                // For better UX, we require at least the first and last "significant" name parts
-                const firstPart = nameParts[0];
-                const lastPart = nameParts[nameParts.length - 1];
+            const prompt = `I need you to identify the correct person from these search results.
+GUEST:
+Name: ${guest.full_name}
+Company: ${guest.company || 'Unknown'}
+Country: ${guest.country || 'Unknown'}
 
-                return text.includes(firstPart) && text.includes(lastPart);
-            })
-            .map((result, index) => {
-                // Extract name from title (LinkedIn titles are usually "Name - Title - Company | LinkedIn")
-                const titleParts = result.title?.split(/[–—|]/);
-                const profileName = titleParts ? titleParts[0]?.replace(' - LinkedIn', '').trim() : null;
+SEARCH RESULTS:
+${resultsInfo}
 
-                // Extract job title and company from title
-                let jobTitle = null;
-                let company = null;
-                const titleMatch = result.title?.match(/[-–—]\s*(.+?)(?:\s*[-–—]\s*(.+?))?(?:\s*\||\s*-\s*LinkedIn|$)/);
-                if (titleMatch) {
-                    jobTitle = titleMatch[1]?.trim();
-                    company = titleMatch[2]?.trim();
+INSTRUCTIONS:
+1. **PRIMARY GOAL**: Find the **LinkedIn** profile that belongs to this guest.
+2. **GOLDEN RULE**: If a valid LinkedIn profile is strictly found (same name + region), select it IMMEDIATELY as the best match.
+3. **PRIORITY**: LinkedIn >>>>> Facebook/Instagram/Pinterest. Only select social media if NO LinkedIn is found.
+4. **LOCATION CHECK**: The result MUST match the guest's country (e.g. Belgium). Do not match a "Fleur Delie" in USA if the guest is in Belgium.
+5. **STUDENTS**: If the guest appears to be a Student (on LinkedIn), this IS A VALID MATCH. Do not discard it just because they aren't a CEO.
+6. **IMPOSTORS**: If the result is a namesake (e.g. historical figure, or wrong region), return bestIndex: null.
+
+Return JSON:
+{
+  "bestIndex": [integer index of the match, or null],
+  "confidence": [0.0 to 1.0],
+  "extractedJobTitle": "[Job title if visible in snippet]",
+  "extractedCompany": "[Company if visible in snippet]",
+  "reason": "[Why you chose this result]"
+}`;
+
+            console.log(`🤖 AI matching guest against ${searchResults.length} results...`);
+            searchResults.forEach((r, i) => {
+                console.log(`  [${i}] ${r.title} - ${r.link}`);
+            });
+            const response = await openai.chat.completions.create({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: 'You are an expert researcher. You prioritize professional sources (LinkedIn) above all else.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.1,
+                response_format: { type: "json_object" }
+            });
+
+            const result = JSON.parse(response.choices[0].message.content);
+
+            if (result.bestIndex !== null && result.confidence >= 0.8 && !result.isHistorical) {
+                const bestSource = searchResults[result.bestIndex];
+                console.log(`✨ Google Fallback match found! ${bestSource.link} (Conf: ${result.confidence})`);
+
+                // NEW: If this is a LinkedIn result, try to parse job title from the title
+                let finalJobTitle = result.extractedJobTitle;
+                let finalCompany = result.extractedCompany;
+
+                if (bestSource.link?.includes('linkedin.com/in/') && bestSource.title) {
+                    const parsed = this.parseLinkedInTitle(bestSource.title, guest.full_name);
+                    if (parsed) {
+                        // Prefer parsed title over AI extracted (more reliable)
+                        if (parsed.jobTitle) finalJobTitle = parsed.jobTitle;
+                        if (parsed.company) finalCompany = parsed.company;
+                        console.log(`💼 Parsed from LinkedIn title: ${parsed.jobTitle} @ ${parsed.company}`);
+                    }
                 }
 
                 return {
-                    id: index,
-                    url: result.link,
-                    title: result.title,
-                    profileName: profileName,
-                    snippet: result.snippet,
-                    thumbnail: result.thumbnail || null,
-                    jobTitle: jobTitle,
-                    company: company
+                    url: bestSource.link,
+                    title: bestSource.title,
+                    snippet: bestSource.snippet,
+                    jobTitle: finalJobTitle,
+                    company: finalCompany,
+                    sourceType: 'google_fallback',
+                    reason: result.reason,
+                    confidence: result.confidence
                 };
-            });
+            }
+
+            if (result.isHistorical) {
+                console.log('🏛️ Discarding match because it refers to a historical figure.');
+            }
+
+            console.log('❌ No clear match found in Google fallback.');
+            return null;
+        } catch (error) {
+            console.error('AI fallback selection error:', error);
+            return null;
+        }
     }
+
+
 
     /**
      * Search for Instagram profile using SerpAPI
@@ -155,42 +483,35 @@ class SmartSearchService {
      * Returns comprehensive profile data including bio, location, etc.
      */
     async searchInstagram(guest) {
-        if (!process.env.SERPAPI_KEY) {
-            return { url: null, handle: null, followers: null, bio: null, location: null, linkedTwitter: null };
-        }
-
         try {
-            // For celebrities, search with "official" or verified indicators
-            const searchQueries = [
-                `site:instagram.com "${guest.full_name}" official`,
+            // ============================================
+            // STEP 1: DuckDuckGo/Brave Search (PRIMARY)
+            // ============================================
+            const primaryQueries = [
                 `site:instagram.com "${guest.full_name}"`,
-                `"${guest.full_name}" instagram official account`
+                `"${guest.full_name}" instagram profile`
             ];
 
-            for (const query of searchQueries) {
-                const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY}&num=10`;
-                const response = await this.fetchWithTimeout(url);
-                const data = await response.json();
-
-                if (data.error) {
-                    console.error('SerpAPI Instagram search error:', data.error);
-                    continue;
+            for (const query of primaryQueries) {
+                // Try DuckDuckGo first (FREE)
+                let results = await duckDuckGo.search(query);
+                if (results.length === 0) {
+                    console.log(`🔍 Falling back to Brave for Instagram: ${query}`);
+                    results = await braveSearch.search(query, 5);
                 }
 
-                const instagramResults = data.organic_results?.filter(r =>
+                const instagramResults = results.filter(r =>
                     r.link?.includes('instagram.com/') &&
-                    !r.link?.includes('/p/') && // Skip posts
-                    !r.link?.includes('/reel/') && // Skip reels
-                    !r.link?.includes('/stories/') // Skip stories
-                ) || [];
+                    !r.link?.includes('/p/') &&
+                    !r.link?.includes('/reel/')
+                );
 
-                // Extract handle from URL
                 for (const result of instagramResults) {
                     const handleMatch = result.link.match(/instagram\.com\/([^\/\?]+)/);
                     if (handleMatch && handleMatch[1] !== 'explore' && handleMatch[1] !== 'accounts') {
                         const handle = handleMatch[1];
 
-                        // Verify this is the right person with AI
+                        // Verify with AI
                         const isMatch = await this.verifySocialProfile(guest, {
                             platform: 'Instagram',
                             handle: handle,
@@ -199,14 +520,67 @@ class SmartSearchService {
                         });
 
                         if (isMatch) {
-                            // Extract comprehensive profile data
-                            const profileData = await this.extractInstagramProfileData(handle, result, guest);
-
                             console.log(`📸 Instagram found: @${handle}`);
-                            if (profileData.bio) console.log(`   📝 Bio: ${profileData.bio.substring(0, 50)}...`);
-                            if (profileData.location) console.log(`   📍 Location: ${profileData.location}`);
-
+                            const profileData = await this.extractInstagramProfileData(handle, result, guest);
                             return profileData;
+                        }
+                    }
+                }
+            }
+
+            // ============================================
+            // STEP 2: FUZZY SEARCH - Try username without spaces
+            // Many users have handles like "maximvantrimpont" not "Maxim Van Trimpont"
+            // ============================================
+            const nameNoSpaces = guest.full_name.toLowerCase().replace(/\s+/g, '');
+            const fuzzyQueries = [
+                `instagram.com/${nameNoSpaces}`,
+                `"@${nameNoSpaces}" instagram`
+            ];
+
+            console.log(`📸 Trying fuzzy Instagram search: ${nameNoSpaces}`);
+
+            for (const query of fuzzyQueries) {
+                // DuckDuckGo first (FREE)
+                let results = await duckDuckGo.search(query);
+                if (results.length === 0) {
+                    results = await braveSearch.search(query, 3);
+                }
+
+                const instagramResults = results.filter(r =>
+                    r.link?.includes('instagram.com/') &&
+                    !r.link?.includes('/p/') &&
+                    !r.link?.includes('/reel/')
+                );
+
+                for (const result of instagramResults) {
+                    const handleMatch = result.link.match(/instagram\.com\/([^\/\?]+)/);
+                    if (handleMatch && handleMatch[1] !== 'explore' && handleMatch[1] !== 'accounts') {
+                        const handle = handleMatch[1];
+
+                        // Check if handle matches the name pattern
+                        const handleLower = handle.toLowerCase().replace(/[._-]/g, '');
+                        if (handleLower.includes(nameNoSpaces.substring(0, 8))) {
+                            // If handle is an EXACT match of the name without spaces, skip AI verification
+                            if (handleLower === nameNoSpaces) {
+                                console.log(`📸 Instagram found via EXACT fuzzy match: @${handle}`);
+                                const profileData = await this.extractInstagramProfileData(handle, result, guest);
+                                return profileData;
+                            }
+
+                            // For partial matches, verify with AI
+                            const isMatch = await this.verifySocialProfile(guest, {
+                                platform: 'Instagram',
+                                handle: handle,
+                                title: result.title,
+                                snippet: result.snippet
+                            });
+
+                            if (isMatch) {
+                                console.log(`📸 Instagram found via fuzzy search: @${handle}`);
+                                const profileData = await this.extractInstagramProfileData(handle, result, guest);
+                                return profileData;
+                            }
                         }
                     }
                 }
@@ -240,20 +614,35 @@ class SmartSearchService {
         };
 
         try {
-            // Parse followers from snippet
-            const followersMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[MK]?\s*[Ff]ollowers/i);
-            if (followersMatch) {
-                profileData.followers = this.parseFollowerCount(followersMatch[0]);
+            // Extract thumbnail from search result (profile photo)
+            if (searchResult.thumbnail) {
+                profileData.profilePhoto = searchResult.thumbnail;
+                console.log(`📸 Found Instagram thumbnail: ${searchResult.thumbnail.substring(0, 50)}...`);
+            }
+
+            // Parse followers from snippet - support Dutch "4,7 mln. volgers" and English "4.7M followers"
+            // Dutch: "4,7 mln. volgers" or "4.7 miljoen volgers"
+            const dutchFollowersMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*(?:mln\.?|miljoen)\s*volgers/i);
+            if (dutchFollowersMatch) {
+                profileData.followers = this.parseFollowerCount(dutchFollowersMatch[0]);
+                console.log(`📊 Dutch followers match: ${dutchFollowersMatch[0]} -> ${profileData.followers}`);
+            } else {
+                // English: "4.7M followers" or "4,700,000 followers"  
+                const followersMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[MKmk]?\s*[Ff]ollowers/i);
+                if (followersMatch) {
+                    profileData.followers = this.parseFollowerCount(followersMatch[0]);
+                    console.log(`📊 English followers match: ${followersMatch[0]} -> ${profileData.followers}`);
+                }
             }
 
             // Parse following count
-            const followingMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[Ff]ollowing/i);
+            const followingMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*(?:volgend|[Ff]ollowing)/i);
             if (followingMatch) {
                 profileData.following = this.parseFollowerCount(followingMatch[0]);
             }
 
-            // Parse posts count
-            const postsMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[MK]?\s*[Pp]osts/i);
+            // Parse posts count - Dutch "berichten" or English "posts"
+            const postsMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*(?:berichten|[Pp]osts)/i);
             if (postsMatch) {
                 profileData.posts = this.parseFollowerCount(postsMatch[0]);
             }
@@ -323,45 +712,35 @@ Return JSON:
      * Returns comprehensive profile data including bio, location, etc.
      */
     async searchTwitter(guest) {
-        if (!process.env.SERPAPI_KEY) {
-            return { url: null, handle: null, followers: null, bio: null, location: null, memberSince: null, linkedInstagram: null };
-        }
-
         try {
-            // Search both twitter.com and x.com domains
-            const searchQueries = [
-                `(site:twitter.com OR site:x.com) "${guest.full_name}" official`,
-                `(site:twitter.com OR site:x.com) "${guest.full_name}"`,
-                `"${guest.full_name}" twitter official account`
+            // ============================================
+            // STEP 1: DuckDuckGo/Brave Search (PRIMARY)
+            // ============================================
+            const primaryQueries = [
+                `site:x.com "${guest.full_name}"`,
+                `site:twitter.com "${guest.full_name}"`,
+                `"${guest.full_name}" twitter profile`
             ];
 
-            for (const query of searchQueries) {
-                const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY}&num=10`;
-                const response = await this.fetchWithTimeout(url);
-                const data = await response.json();
-
-                if (data.error) {
-                    console.error('SerpAPI Twitter search error:', data.error);
-                    continue;
+            for (const query of primaryQueries) {
+                // DuckDuckGo first (FREE)
+                let results = await duckDuckGo.search(query);
+                if (results.length === 0) {
+                    console.log(`🔍 Falling back to Brave for Twitter: ${query}`);
+                    results = await braveSearch.search(query, 5);
                 }
 
-                const twitterResults = data.organic_results?.filter(r =>
+                const twitterResults = results.filter(r =>
                     (r.link?.includes('twitter.com/') || r.link?.includes('x.com/')) &&
-                    !r.link?.includes('/status/') && // Skip individual tweets
-                    !r.link?.includes('/i/') // Skip internal pages
-                ) || [];
+                    !r.link?.includes('/status/')
+                );
 
-                // Extract handle from URL
                 for (const result of twitterResults) {
                     const handleMatch = result.link.match(/(?:twitter|x)\.com\/([^\/\?]+)/);
-                    if (handleMatch &&
-                        handleMatch[1] !== 'search' &&
-                        handleMatch[1] !== 'explore' &&
-                        handleMatch[1] !== 'home' &&
-                        handleMatch[1] !== 'i') {
+                    if (handleMatch && !['search', 'explore', 'home', 'i', 'intent'].includes(handleMatch[1])) {
                         const handle = handleMatch[1];
 
-                        // Verify this is the right person with AI
+                        // Verify with AI
                         const isMatch = await this.verifySocialProfile(guest, {
                             platform: 'Twitter/X',
                             handle: handle,
@@ -370,14 +749,8 @@ Return JSON:
                         });
 
                         if (isMatch) {
-                            // Extract comprehensive profile data
-                            const profileData = await this.extractTwitterProfileData(handle, result, guest);
-
                             console.log(`🐦 Twitter/X found: @${handle}`);
-                            if (profileData.bio) console.log(`   📝 Bio: ${profileData.bio.substring(0, 50)}...`);
-                            if (profileData.location) console.log(`   📍 Location: ${profileData.location}`);
-                            if (profileData.linkedInstagram) console.log(`   📸 Linked Instagram: ${profileData.linkedInstagram}`);
-
+                            const profileData = await this.extractTwitterProfileData(handle, result, guest);
                             return profileData;
                         }
                     }
@@ -412,14 +785,26 @@ Return JSON:
         };
 
         try {
-            // Parse followers from snippet
-            const followersMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[MK]?\s*[Ff]ollowers/i);
-            if (followersMatch) {
-                profileData.followers = this.parseFollowerCount(followersMatch[0]);
+            // Extract thumbnail from search result (profile photo)
+            if (searchResult.thumbnail) {
+                profileData.profilePhoto = searchResult.thumbnail;
+                console.log(`📸 Found Twitter thumbnail: ${searchResult.thumbnail.substring(0, 50)}...`);
+            }
+
+            // Parse followers from snippet - support Dutch "4,7 mln. volgers" and English "4.7M followers"
+            const dutchFollowersMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*(?:mln\.?|miljoen)\s*volgers/i);
+            if (dutchFollowersMatch) {
+                profileData.followers = this.parseFollowerCount(dutchFollowersMatch[0]);
+                console.log(`📊 Dutch Twitter followers match: ${dutchFollowersMatch[0]} -> ${profileData.followers}`);
+            } else {
+                const followersMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[MKmk]?\s*[Ff]ollowers/i);
+                if (followersMatch) {
+                    profileData.followers = this.parseFollowerCount(followersMatch[0]);
+                }
             }
 
             // Parse following count
-            const followingMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*[MK]?\s*[Ff]ollowing/i);
+            const followingMatch = searchResult.snippet?.match(/(\d+(?:[.,]\d+)?)\s*(?:volgend|[MKmk]?\s*[Ff]ollowing)/i);
             if (followingMatch) {
                 profileData.following = this.parseFollowerCount(followingMatch[0]);
             }
@@ -493,14 +878,13 @@ Return JSON:
                 }
             }
 
-            // Try to get more details with a dedicated Twitter profile search
-            const profileSearchUrl = `https://serpapi.com/search.json?engine=google&q=site:x.com/${handle} OR site:twitter.com/${handle}&api_key=${process.env.SERPAPI_KEY}&num=5`;
-            const profileResponse = await this.fetchWithTimeout(profileSearchUrl);
-            const profileSearchData = await profileResponse.json();
+            // Try to get more details with a dedicated Twitter profile search using DuckDuckGo
+            const profileQuery = `site:x.com/${handle} OR site:twitter.com/${handle}`;
+            const profileResults = await duckDuckGo.search(profileQuery);
 
-            if (profileSearchData.organic_results?.length > 0) {
+            if (profileResults.length > 0) {
                 // Look for the main profile result
-                const mainProfile = profileSearchData.organic_results.find(r =>
+                const mainProfile = profileResults.find(r =>
                     (r.link?.endsWith(`/${handle}`) || r.link?.includes(`/${handle}?`)) &&
                     !r.link?.includes('/status/')
                 );
@@ -587,143 +971,351 @@ Return JSON: { "isMatch": true/false, "confidence": 0.0-1.0, "reason": "brief ex
     }
 
     /**
-     * Parse follower count strings like "10M followers", "5.2K followers"
+     * Parse follower count strings like "10M followers", "5.2K followers", "4,7 mln. volgers"
+     * Supports both English (M/K) and Dutch (mln./miljoen, k/duizend) formats
      */
     parseFollowerCount(str) {
         if (!str) return null;
-        const match = str.match(/(\d+(?:[.,]\d+)?)\s*([MKmk])?/);
-        if (!match) return null;
 
-        let num = parseFloat(match[1].replace(',', '.'));
-        const multiplier = match[2]?.toUpperCase();
+        // Log for debugging
+        console.log(`📊 Parsing follower count from: "${str}"`);
 
-        if (multiplier === 'M') num *= 1000000;
-        else if (multiplier === 'K') num *= 1000;
+        // Try Dutch format first: "4,7 mln." or "4.7 miljoen"
+        const dutchMatch = str.match(/(\d+(?:[.,]\d+)?)\s*(?:mln\.?|miljoen)/i);
+        if (dutchMatch) {
+            const num = parseFloat(dutchMatch[1].replace(',', '.')) * 1000000;
+            console.log(`📊 Parsed Dutch millions: ${num}`);
+            return Math.round(num);
+        }
 
-        return Math.round(num);
+        // Try "duizend" or Dutch K format
+        const dutchKMatch = str.match(/(\d+(?:[.,]\d+)?)\s*(?:k|duizend)/i);
+        if (dutchKMatch) {
+            const num = parseFloat(dutchKMatch[1].replace(',', '.')) * 1000;
+            console.log(`📊 Parsed Dutch thousands: ${num}`);
+            return Math.round(num);
+        }
+
+        // Standard English format: 10M, 5.2K, 1.5M
+        const englishMatch = str.match(/(\d+(?:[.,]\d+)?)\s*([MKmk])\b/);
+        if (englishMatch) {
+            let num = parseFloat(englishMatch[1].replace(',', '.'));
+            const multiplier = englishMatch[2].toUpperCase();
+
+            if (multiplier === 'M') num *= 1000000;
+            else if (multiplier === 'K') num *= 1000;
+
+            console.log(`📊 Parsed English format: ${num}`);
+            return Math.round(num);
+        }
+
+        // Plain number (no suffix) - only use if it's a large number (likely followers not posts)
+        const plainMatch = str.match(/(\d{1,3}(?:[.,]\d{3})*|\d+)\s*(?:followers?|volgers?)/i);
+        if (plainMatch) {
+            // Remove thousand separators and parse
+            const numStr = plainMatch[1].replace(/[.,](?=\d{3})/g, '');
+            const num = parseInt(numStr, 10);
+            console.log(`📊 Parsed plain number with followers keyword: ${num}`);
+            return num;
+        }
+
+        // Fallback: just try to find a number followed by M/K anywhere
+        const fallbackMatch = str.match(/(\d+(?:[.,]\d+)?)\s*([MKmk])/);
+        if (fallbackMatch) {
+            let num = parseFloat(fallbackMatch[1].replace(',', '.'));
+            const multiplier = fallbackMatch[2].toUpperCase();
+
+            if (multiplier === 'M') num *= 1000000;
+            else if (multiplier === 'K') num *= 1000;
+
+            console.log(`📊 Parsed fallback: ${num}`);
+            return Math.round(num);
+        }
+
+        console.log(`📊 Could not parse follower count from: "${str}"`);
+        return null;
     }
 
     /**
      * Detect if a person is likely a celebrity (for prioritizing social media search)
+     * Uses GPT's training knowledge to identify famous people directly by name
      */
     async detectCelebrity(guest, linkedinInfo) {
+        // STEP 1: Try Knowledge Graph first (most reliable, if enabled)
+        const kgResult = await knowledgeGraph.detectCelebrity(guest.full_name);
+
+        if (kgResult.isCelebrity && kgResult.confidence >= 0.5) {
+            console.log(`📚 Celebrity detected via Knowledge Graph: ${kgResult.knownFor}`);
+            return {
+                isCelebrity: true,
+                confidence: kgResult.confidence,
+                category: kgResult.category,
+                knownFor: kgResult.knownFor,
+                detailedDescription: kgResult.detailedDescription,
+                wikipediaUrl: kgResult.wikipediaUrl,
+                officialImage: kgResult.officialImage,
+                socialMediaPriority: this.inferSocialPriority(kgResult.category),
+                source: 'knowledge_graph'
+            };
+        }
+
+        // STEP 2: GPT-based detection (uses training knowledge directly)
         const openai = this.getOpenAI();
-        if (!openai) return { isCelebrity: false, category: null };
+        if (!openai) return { isCelebrity: false, category: null, source: 'none' };
 
         try {
-            const context = linkedinInfo?.bestMatch ?
-                `LinkedIn: ${linkedinInfo.bestMatch.title} - ${linkedinInfo.bestMatch.snippet}` :
-                'No LinkedIn found';
+            console.log(`🧠 GPT celebrity check for: ${guest.full_name}`);
 
-            const prompt = `Is "${guest.full_name}" a celebrity or public figure? Consider:
-- Entertainment (musicians, actors, directors, producers)
-- Sports (athletes, coaches)
-- Media (TV hosts, journalists, influencers)
-- Politics (politicians, diplomats)
-- Business (famous CEOs, entrepreneurs like Elon Musk)
+            const prompt = `You are identifying if "${guest.full_name}" is a FAMOUS person.
 
-Context: ${context}
-Country: ${guest.country || 'Unknown'}
+USE YOUR TRAINING KNOWLEDGE. You know millions of celebrities, athletes, musicians, actors, politicians, and famous business people.
+
+CATEGORIES:
+- entertainment: musicians, actors, directors, producers, comedians, artists
+- sports: professional athletes, olympians, coaches, racing drivers
+- media: TV hosts, journalists, YouTubers, major influencers (1M+ followers)
+- politics: presidents, prime ministers, ministers, famous politicians
+- business: ONLY globally famous CEOs (Elon Musk, Jeff Bezos level - NOT random company owners)
+
+GUEST INFO:
+- Name: ${guest.full_name}
+- Country hint: ${guest.country || 'Unknown'}
+
+RULES:
+1. If you KNOW this person from your training (Wikipedia-level fame), return isCelebrity: true
+2. If unsure or the name is too common (e.g. "John Smith"), return isCelebrity: false
+3. For entertainment/sports/media: be confident if you recognize the name
+4. For business: ONLY true for household-name billionaires/CEOs
 
 Return JSON:
 {
   "isCelebrity": true/false,
-  "confidence": 0.0-1.0,
+  "confidence": 0.85-1.0 if you KNOW them, 0.0-0.5 if guessing,
   "category": "entertainment|sports|media|politics|business|null",
-  "knownFor": "brief description if known, otherwise null",
-  "socialMediaPriority": "instagram|twitter|both|null" (which platform they're most known for)
+  "knownFor": "Their claim to fame in 1-2 sentences, or null",
+  "socialMediaPriority": "instagram|twitter|both|null",
+  "wikipediaUrl": "https://en.wikipedia.org/wiki/... (if you know it) or null"
 }`;
 
             const response = await openai.chat.completions.create({
                 model: 'gpt-4o-mini',
                 messages: [
-                    { role: 'system', content: 'You are an expert at identifying celebrities and public figures. You have knowledge of famous people worldwide.' },
+                    {
+                        role: 'system',
+                        content: 'You are a celebrity identification expert. You have encyclopedic knowledge of famous people worldwide. Answer based on your training data - if you know WHO they are, they are a celebrity. Musicians, athletes, actors, politicians with Wikipedia pages = definitely celebrities.'
+                    },
                     { role: 'user', content: prompt }
                 ],
                 temperature: 0.1,
                 response_format: { type: "json_object" }
-            }, { timeout: 45000 });
+            }, { timeout: 30000 });
 
             const result = JSON.parse(response.choices[0].message.content);
-            console.log(`⭐ Celebrity detection: ${result.isCelebrity ? `Yes - ${result.category}` : 'No'} (${Math.round(result.confidence * 100)}%)`);
+            result.source = 'gpt';
+
+            if (result.isCelebrity) {
+                console.log(`⭐ CELEBRITY CONFIRMED: ${guest.full_name} - ${result.category} (${Math.round(result.confidence * 100)}%)`);
+                console.log(`   → ${result.knownFor}`);
+            } else {
+                console.log(`👤 Not a celebrity: ${guest.full_name}`);
+            }
+
+            // Infer social priority if not set
+            if (result.isCelebrity && !result.socialMediaPriority) {
+                result.socialMediaPriority = this.inferSocialPriority(result.category);
+            }
 
             return result;
         } catch (error) {
             console.error('Celebrity detection error:', error);
-            return { isCelebrity: false, category: null };
+            return { isCelebrity: false, category: null, source: 'error' };
         }
     }
 
     /**
-     * Try to find a profile photo using Google Images if standard search fails
+     * Infer social media priority based on celebrity category
      */
-    async findProfilePhoto(guest, targetUrl = null) {
-        if (!process.env.SERPAPI_KEY) return null;
+    inferSocialPriority(category) {
+        if (category === 'entertainment') return 'instagram';
+        if (category === 'sports') return 'instagram';
+        if (category === 'politics') return 'twitter';
+        if (category === 'business') return 'twitter';
+        return 'both';
+    }
 
+    /**
+     * Determine if we should invest time in social media searches.
+     * 
+     * BUSINESS RULE:
+     * - Celebrities in entertainment/sports/media → YES, search socials
+     * - Standard business people → NO, LinkedIn is enough
+     * - Unknown (no LinkedIn or celebrity info) → YES, might be influential
+     * 
+     * This prevents wasting time searching for the personal Instagram of a CEO,
+     * which is usually private and not useful for hotel staff.
+     */
+    shouldSearchSocialMedia(celebrityInfo, linkedinInfo) {
+        // If confirmed celebrity in entertainment/sports/media → Always search
+        if (celebrityInfo.isCelebrity) {
+            const publicCategories = ['entertainment', 'sports', 'media'];
+            if (publicCategories.includes(celebrityInfo.category)) {
+                console.log(`✅ Social search: Celebrity in ${celebrityInfo.category}`);
+                return true;
+            }
+            // Business/Politics celebrities might still be public figures
+            if (celebrityInfo.confidence >= 0.9) {
+                console.log(`✅ Social search: High-confidence celebrity (${celebrityInfo.category})`);
+                return true;
+            }
+        }
+
+        // If no LinkedIn found → Search socials as fallback discovery
+        if (!linkedinInfo?.bestMatch) {
+            console.log(`✅ Social search: No LinkedIn found, using socials as discovery`);
+            return true;
+        }
+
+        // LinkedIn found for standard business person → Skip personal socials
+        console.log(`❌ Social search skipped: Standard business guest with LinkedIn`);
+        return false;
+    }
+
+    /**
+     * Verify if a social media account matches the celebrity status
+     * Prevents Jay-Z being matched to an account with 200 followers.
+     */
+    async verifySocialMediaRelevance(guest, result, celebrityInfo, platform) {
+        if (!result || !result.url) return result;
+
+        console.log(`🕵️ Verifying ${platform} for celebrity ${guest.full_name}...`);
+
+        // Rule 1: Verified accounts are usually safe
+        // (We can't easily check blue tick without complex scraping, but high followers is a proxy)
+
+        // Rule 2: Follower count sanity check
+        const followers = result.followers;
+
+        if (followers !== null) {
+            // Thresholds
+            const MIN_CELEBRITY_FOLLOWERS = 50000; // 50k
+            const SUSPICIOUS_CELEBRITY_FOLLOWERS = 5000; // 5k
+
+            console.log(`📊 Account has ${followers} followers. Celebrity Threshold: ${MIN_CELEBRITY_FOLLOWERS}`);
+
+            if (followers < SUSPICIOUS_CELEBRITY_FOLLOWERS) {
+                console.warn(`❌ REJECTED: ${guest.full_name} is a celebrity but this account has only ${followers} followers.`);
+                return { url: null, handle: null, followers: null, bio: null };
+            }
+
+            if (followers < MIN_CELEBRITY_FOLLOWERS) {
+                console.warn(`⚠️ WARNING: Low follower count for a celebrity (${followers}). Keeping but flagging.`);
+                // We could ask AI to double check description here if we wanted
+            }
+        } else {
+            // Logic when we couldn't parse followers:
+            // If we are SURE it's a huge celebrity (Confidence > 0.9), we might reject unverified/unscraped profiles
+            if (celebrityInfo.confidence >= 0.9) {
+                console.warn(`⚠️ Could not verify followers for MAJOR celebrity. Proceeding with caution.`);
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Search for recent news about the guest using SerpAPI
+     * Returns relevant news from the last 6 months
+     */
+    async searchRecentNews(guest) {
+        const guestName = guest.full_name;
         try {
-            // More specific query. If we have a URL, use it directly to find its images
-            const query = targetUrl
-                ? `site:linkedin.com/in/ "${guest.full_name}" profile photo`
-                : `site:linkedin.com/in/ "${guest.full_name}" profile photo`;
+            // Try DuckDuckGo first (FREE)
+            let articles = await duckDuckGo.search(`"${guestName}" news`);
 
-            const url = `https://serpapi.com/search.json?engine=google_images&q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY}&num=15`;
-
-            const response = await this.fetchWithTimeout(url);
-            const data = await response.json();
-
-            if (!data.images_results || data.images_results.length === 0) {
-                return null;
+            if (articles.length === 0) {
+                console.log(`📰 No news found via DuckDuckGo, trying Brave fallback...`);
+                // Fallback to Brave Search
+                articles = await braveSearch.search(`"${guestName}" news`, 5);
             }
 
-            // Look for LinkedIn source and profile-displayphoto in the URL
-            // We are MUCH stricter now: must be from LinkedIn domain and look like a profile photo
-            const linkedInImages = data.images_results.filter(img => {
-                const source = img.source?.toLowerCase() || '';
-                const link = img.link?.toLowerCase() || '';
-                const original = img.original?.toLowerCase() || '';
-                const title = img.title?.toLowerCase() || '';
+            if (articles.length > 0) {
+                console.log(`📰 Found ${articles.length} news articles for ${guestName}, verifying relevance...`);
 
-                const isLinkedInSource = source.includes('linkedin') || link.includes('linkedin.com/in/');
-                const isProfilePattern = original.includes('profile-displayphoto') ||
-                    original.includes('media.licdn.com/dms/image') ||
-                    original.includes('profile-photo') ||
-                    original.includes('profile_photo');
+                // VERIFY RELEVANCE WITH AI
+                const verifiedArticles = await this.verifyNewsRelevance(guest, articles);
 
-                // If we have a target URL, we MUST have a strong match
-                let urlMatch = true;
-                if (targetUrl) {
-                    // Extract ID from target URL (e.g., https://linkedin.com/in/john-doe -> john-doe)
-                    const targetId = targetUrl.split('/in/')[1]?.split('/')[0]?.replace(/\/$/, '');
-
-                    // Normalize the link (e.g., remove trailing slashes and query params)
-                    const normalizedLink = link.split('?')[0].replace(/\/$/, '');
-                    const normalizedTarget = targetUrl.split('?')[0].replace(/\/$/, '');
-
-                    // The image MUST come from the target profile page OR contain the ID in the image URL
-                    const isSamePage = normalizedLink === normalizedTarget;
-                    const containsId = targetId && (original.includes(targetId) || link.includes(targetId));
-
-                    urlMatch = isSamePage || (isLinkedInSource && containsId && isProfilePattern);
+                if (verifiedArticles.length > 0) {
+                    console.log(`✅ Verified ${verifiedArticles.length} relevant articles.`);
+                    return {
+                        articles: verifiedArticles,
+                        hasNews: true
+                    };
                 } else {
-                    // If no target URL, we still require it to be from LinkedIn and look like a profile photo
-                    urlMatch = isLinkedInSource && isProfilePattern;
+                    console.log(`🗑️ All articles discarded as irrelevant to ${guestName}.`);
                 }
-
-                return urlMatch && isProfilePattern;
-            });
-
-            if (linkedInImages.length > 0) {
-                console.log(`🖼️ Found verified LinkedIn profile photo for ${guest.full_name}`);
-                return linkedInImages[0].original;
             }
 
-            console.log(`🖼️ No verified LinkedIn profile photo found for ${guest.full_name}, skipping to avoid incorrect photo`);
-            return null;
+            console.log(`📰 No verified news articles found for ${guestName}`);
+            return { articles: [], hasNews: false };
         } catch (error) {
-            console.error('Image search error:', error);
-            return null;
+            console.error('News search error:', error);
+            return { articles: [], hasNews: false };
         }
     }
+
+    /**
+     * Check if news articles are actually about THIS guest
+     */
+    async verifyNewsRelevance(guest, articles) {
+        const openai = this.getOpenAI();
+        if (!openai) return articles; // Fallback if no OpenAI
+
+        try {
+            const articlesText = articles.map((a, i) => `[${i}] Title: ${a.title}\nSnippet: ${a.snippet}`).join('\n\n');
+            const prompt = `I have found news articles for a guest: "${guest.full_name}".
+Help me verify if these articles are about THIS SPECIFIC PERSON or someone else with the same name.
+
+GUEST CONTEXT:
+Name: ${guest.full_name}
+Company: ${guest.company || 'Unknown'}
+Location: ${guest.country || 'Unknown'}
+Known Job: ${guest.job_title || 'Unknown'}
+
+ARTICLES FOUND:
+${articlesText}
+
+INSTRUCTIONS:
+1. Compare the context (company, industry, location) with the article content.
+2. If an article is about a crime (fraud, murder, etc.) and the guest context is a reputable business person, ASSUME IT IS A FALSE POSITIVE unless the company/location matches perfectly.
+3. Be strict. Better to miss an article than to accuse a guest of a crime.
+4. "Leslie Okyere" (Founder NL Connekt) is NOT the "Leslie Okyere" convicted of bank fraud in the US.
+5. Return a JSON array of indices that are SAFE and RELEVANT.
+
+Return JSON:
+{
+  "relevantMetrics": [0, 2] // indices of valid articles
+}`;
+
+            const response = await openai.chat.completions.create({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: 'You are a strict reputation manager. You filter out news about namesakes.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.0,
+                response_format: { type: "json_object" }
+            });
+
+            const result = JSON.parse(response.choices[0].message.content);
+            const validIndices = result.relevantMetrics || [];
+
+            return articles.filter((_, i) => validIndices.includes(i));
+        } catch (error) {
+            console.error('News verification error:', error);
+            return []; // Fail safe: return nothing if verification errors
+        }
+    }
+
 
     /**
      * Use AI to select the best match from candidates
@@ -757,10 +1349,12 @@ CANDIDATES:
 ${candidatesInfo}
 
 INSTRUCTIONS:
-1. Be EXTREMELY strict. If the company doesn't match and the name is common, it's likely NOT a match.
-2. If the name is very unique, you can be slightly more flexible with the company (maybe they switched jobs).
-3. If multiple candidates look similar, set matchesIdentity to false so the user can review.
-4. If NONE of the candidates are a strong match, set bestMatchIndex to null.
+1. EXTREEM STRENG OP LOCATIE: Als het land of de regio niet overeenkomt (bijv. Zwitserland vs België), verlaag de confidence direct naar 0, tenzij er expliciet bewijs is van een verhuizing in het profiel.
+2. Be EXTREMELY strict. If the company doesn't match and the name is common, it's likely NOT a match.
+3. If NOTHING matches perfectly (no company/location match), return bestMatchIndex: null. DO NOT guess based on high status if the location is wrong.
+4. CATEGORISCHE AFWIJZING: Als een kandidaat overduidelijk een historisch figuur is (geboren pre-1940), wijs deze dan direct af.
+5. If multiple candidates look similar and you are not 90% sure, set bestMatchIndex to null or set matchesIdentity to false so the user MUST review.
+6. PREFER SOCIAL PROOF: If one profile has indicators of high status (e.g. "500+ connections", "Director", "Managing Partner") and the other looks junior or incomplete, prefer the high-status one ONLY if the location/company matches.
 
 Return JSON:
 {
@@ -813,10 +1407,10 @@ NOTE: We are looking for successful business professionals, entrepreneurs, and d
     }
 
     /**
-     * Use OpenAI to analyze LinkedIn info and calculate VIP score
-     * Generates a comprehensive guest report
+     * Use OpenAI to analyze LinkedIn, News, and Company info to calculate VIP score
+     * Generates a comprehensive guest report with confidence levels
      */
-    async analyzeWithAI(guest, linkedinInfo, celebrityInfo = null) {
+    async analyzeWithAI(guest, linkedinInfo, celebrityInfo = null, newsInfo = null, fallbackInfo = null) {
         const openai = this.getOpenAI();
         if (!openai) {
             console.log('OpenAI not configured, using basic scoring');
@@ -826,113 +1420,172 @@ NOTE: We are looking for successful business professionals, entrepreneurs, and d
         try {
             // Build context from LinkedIn
             const linkedinContext = linkedinInfo.bestMatch ? `
-LinkedIn profiel gevonden:
+LINKEDIN DATA:
 - Titel: ${linkedinInfo.bestMatch.title}
-- Snippet: ${linkedinInfo.bestMatch.snippet}
 - Functie: ${linkedinInfo.bestMatch.jobTitle || 'Onbekend'}
-- Bedrijf: ${linkedinInfo.bestMatch.company || 'Onbekend'}` : 'Geen LinkedIn profiel gevonden.';
+- Bedrijf: ${linkedinInfo.bestMatch.company || 'Onbekend'}
+- Bio Snippet: ${linkedinInfo.bestMatch.snippet || 'Geen'}` : 'Geen LinkedIn profiel gevonden.';
+
+            // Build context from Fallback (if no LinkedIn)
+            let fallbackContext = '';
+            if (fallbackInfo) {
+                fallbackContext = `
+GEVONDEN WEB PROFIEL (AI-geselecteerd):
+- Titel: ${fallbackInfo.title}
+- Bron: ${fallbackInfo.url}
+- Gedetecteerde Functie: ${fallbackInfo.jobTitle || 'Onbekend'}
+- Gedetecteerd Bedrijf: ${fallbackInfo.company || 'Onbekend'}
+- Snippet: ${fallbackInfo.snippet}`;
+
+                // Include deep-scraped content if available (MUCH RICHER DATA!)
+                if (fallbackInfo.deepContent) {
+                    fallbackContext += `
+
+VOLLEDIGE WEBSITE INHOUD (Deep Scraped):
+${fallbackInfo.deepContent.substring(0, 6000)}`;
+                }
+            }
 
             // Build celebrity context
             const celebrityContext = celebrityInfo?.isCelebrity ? `
-⭐ BELANGRIJK: Dit is waarschijnlijk een BEROEMDHEID!
+KNOWLEDGE GRAPH DATA (CELEBRITY):
 - Categorie: ${celebrityInfo.category || 'Onbekend'}
 - Bekend van: ${celebrityInfo.knownFor || 'Onbekend'}
-- Sociale media prioriteit: ${celebrityInfo.socialMediaPriority || 'Onbekend'}
-Dit vereist EXTRA HOGE VIP-behandeling!` : '';
+- Vermelding: ${celebrityInfo.detailedDescription || 'Nvt'}` : '';
 
-            const prompt = `Je bent een VIP-gastanalist voor een 5-sterren luxe hotel. Schrijf een UITGEBREID professioneel rapport over deze gast.
+            // Build news context
+            const newsContext = newsInfo?.hasNews ? `
+RECENT NIEUWS (Laatste 6 maanden):
+${newsInfo.articles.map(a => `- ${a.title} (${a.source}): ${a.snippet}`).join('\n')}` : 'Geen recent nieuws gevonden.';
 
-GASTINFORMATIE:
-Naam: ${guest.full_name}
-Land: ${guest.country || 'Onbekend'}
-${guest.company ? `Bedrijf: ${guest.company}` : ''}
-${guest.notes ? `Extra info: ${guest.notes}` : ''}
-
-${linkedinContext}
-${celebrityContext}
-
-${guest.company_info ? `
-Gedetailleerde bedrijfsinformatie:
+            // Build company context
+            const companyContext = guest.company_info ? `
+BEDRIJFS DATA:
+- Naam: ${guest.company_info.name}
 - Industry: ${guest.company_info.industry || 'Onbekend'}
 - Grootte: ${guest.company_info.size || 'Onbekend'}
 - Beschrijving: ${guest.company_info.description || 'Onbekend'}
 ${guest.company_info.deep_info ? `
-Website Analyse:
+WEBSITE ANALYSE:
 - Missie: ${guest.company_info.deep_info.mission}
 - Diensten: ${guest.company_info.deep_info.products_services?.join(', ')}
-- Doelgroep: ${guest.company_info.deep_info.target_market}` : ''}
-` : ''}
+- Doelgroep: ${guest.company_info.deep_info.target_market}` : ''}` : '';
 
-Genereer een UITGEBREID en GEDETAILLEERD JSON-antwoord met de volgende structuur:
+            const prompt = `Je bent een VIP-gastanalist voor een 5-sterren luxe hotel. Analyseer de data over "${guest.full_name}" en schrijf een professioneel rapport.
+
+--- STRIKTE REGELS ---
+1. GEEN SPECULATIE: Vermeld alleen wat direct uit de data blijkt.
+2. GEEN FLUFF: Schrijf feitelijk en zakelijk. Geen standaard openingszinnen of beleefdheidsvormen.
+3. NATUURLIJKE TEKST: Vermijd het woord "null" of "onbekend" in de rapport-текsten. Als informatie er niet is, laat het dan gewoon achterwege uit het verhaal. Geen lege plekken of gaten in opsommingen.
+4. FORMATTERING: Gebruik voor getallen (zoals volgers) compacte notaties (bijv. 18k in plaats van 18.000).
+5. GEPERSONALISEERDE AANBEVELINGEN: Maak de service aanbevelingen echt specifiek voor deze persoon. Geen algemene "wees beleefd" adviezen, maar acties gebaseerd op hun interesses, rol of recente prestaties.
+6. CONFIDENCE SCORING: Geef voor elk belangrijk veld een confidence score ("high", "medium", "low").
+7. KRITISCHE BLIK & ANTI-HISTORIE: Wees extreem kritisch op de bronnen. Is dit echt de levende persoon die nu in ons hotel verblijft? 
+   - HISTORISCHE FIGUREN: Als je data ziet over mensen geboren in de 19e of vroege 20e eeuw (bijv. 1882), of mensen die al lang overleden zijn: NEGEER DEZE COMPLEET. Rapporteer GEEN geschiedenisles.
+   - NAAMGENOTEN: Als de naam veelvoorkomend is en er is geen match met land/bedrijf, neem dan aan dat het een naamgenoot is en rapporteer niets. 
+   - RESULTAAT BIJ GEEN INFO: Als er geen actuele, relevante informatie is over de gast als levende persoon, zet dan alle velden op "null" of "Geen informatie gevonden" en zet noResultsFound op true. Rapporteer NOOIT over iemand anders alleen omdat de naam hetzelfde is.
+8. FOCUS OP VIP STATUS: We zoeken werkervaring, vermogen, titels en invloed van de HUIDIGE persoon.
+
+--- DATA INPUT ---
+NAAM: ${guest.full_name}
+LAND: ${guest.country || 'Onbekend'}
+NOTITIES: ${guest.notes || 'Geen'}
+
+${linkedinContext}
+${fallbackContext}
+${celebrityContext}
+${newsContext}
+${companyContext}
+
+--- OUTPUT FORMAT (JSON) ---
 {
-  "vip_score": [1-10 getal, waarbij 10 = extreem VIP/CEO's van grote bedrijven/miljardairs],
-  "industry": "[sector]",
-  "company_size": "[Micro (1-10)/Klein (10-50)/Middelgroot (50-250)/Groot (250+)]",
-  "is_owner": [true/false/null],
-  "employment_type": "[Eigenaar/Oprichter/CEO/Partner/Directeur/Manager/Werknemer/Zelfstandige]",
-  "notable_info": "[korte samenvatting, max 150 tekens]",
-  "influence_level": "[Laag/Gemiddeld/Hoog/VIP]",
-  "net_worth_estimate": "[geschat vermogen of null]",
+  "vip_score": { "value": 1-10, "confidence": "high/medium/low", "reason": "..." },
+  "industry": { "value": "...", "confidence": "..." },
+  "company_size": { "value": "Micro/Klein/Middelgroot/Groot", "confidence": "..." },
+  "is_owner": { "value": true/false/null, "confidence": "..." },
+  "employment_type": { "value": "...", "confidence": "..." },
+  "influence_level": { "value": "Laag/Gemiddeld/Hoog/VIP", "confidence": "..." },
+  "net_worth_estimate": { "value": "...", "confidence": "..." },
+  "notable_info": "Max 150 tekens samenvatting",
   "full_report": {
-    "executive_summary": "[2-3 zinnen samenvatting van wie deze persoon is en waarom ze belangrijk zijn]",
+    "executive_summary": "Krachtige samenvatting van 2-3 zinnen.",
     "professional_background": {
-      "current_role": "[huidige functie en verantwoordelijkheden]",
-      "career_trajectory": "[korte beschrijving van carrièrepad en belangrijke posities]",
-      "industry_expertise": "[gebieden van expertise en specialisatie]",
-      "notable_achievements": "[belangrijke prestaties, awards, publicaties indien bekend]"
+      "current_role": "Huidige functie en verantwoordelijkheden",
+      "career_trajectory": "Korte beschrijving van carrièrepad",
+      "industry_expertise": "Expertisegebieden",
+      "notable_achievements": "Belangrijke prestaties"
     },
     "company_analysis": {
-      "company_name": "[bedrijfsnaam]",
-      "company_description": "[wat doet het bedrijf]",
-      "company_position": "[marktpositie en reputatie]",
-      "estimated_revenue": "[geschatte omzet indien bekend, anders null]",
-      "employee_count": "[aantal werknemers indien bekend]"
+      "company_name": "Bedrijfsnaam",
+      "company_description": "Wat doet het bedrijf",
+      "company_position": "Marktpositie",
+      "employee_count": "Aantal werknemers indien bekend"
     },
     "vip_indicators": {
-      "wealth_signals": "[indicaties van vermogen zoals bedrijfseigendom, positie, industrie]",
-      "influence_factors": "[factoren die invloed aangeven zoals netwerk, media-aandacht]",
-      "status_markers": "[statusmarkers zoals titels, lidmaatschappen, exclusieve posities]"
+      "wealth_signals": "Indicaties van vermogen",
+      "influence_factors": "Factoren die invloed aangeven",
+      "status_markers": "Statusmarkers zoals titels"
     },
     "service_recommendations": {
-      "priority_level": "[Standaard/Verhoogd/VIP/Ultra-VIP]",
-      "special_attention": "[speciale aandachtspunten voor het hotelpersoneel]",
-      "potential_interests": "[mogelijke interesses en voorkeuren gebaseerd op profiel]",
-      "communication_style": "[aanbevolen communicatiestijl: formeel/semi-formeel/informeel]",
-      "gift_suggestions": "[suggesties voor attenties of geschenken indien VIP]"
+      "priority_level": "Standaard/Verhoogd/VIP/Ultra-VIP",
+      "quick_win": "De meest impactvolle directe actie (max 100 tekens). Bijv: 'Feliciteer met recente beursgang van [Bedrijf]'.",
+      "categories": [
+        {
+          "title": "Persoonlijke Aandacht",
+          "items": ["Concrete tip 1", "Concrete tip 2"]
+        },
+        {
+          "title": "Gespreksonderwerpen & Nieuws",
+          "items": ["Refereer aan [Nieuwsfeit]", "Vraag naar [Interesse]"]
+        },
+        {
+          "title": "Gastvrijheid & Attenties",
+          "items": ["Suggestie voor drankje/cadeau", "Specifieke kamer-aanpassing"]
+        }
+      ]
     },
-    "additional_notes": "[eventuele extra relevante informatie of waarschuwingen]"
+    "additional_notes": "Eventuele extra relevante informatie"
   }
-}
-
-BELANGRIJK:
-- Wees zo specifiek en gedetailleerd mogelijk gebaseerd op de beschikbare informatie
-- Als informatie ontbreekt, geef een weloverwogen inschatting gebaseerd op de context
-- Het full_report moet MINIMAAL 400 woorden bevatten
-- Focus op bruikbare informatie voor hotelpersoneel
-- Schrijf in het Nederlands`;
+} `;
 
             const response = await openai.chat.completions.create({
                 model: 'gpt-4o-mini',
                 messages: [
-                    { role: 'system', content: 'Je bent een expert VIP-gastanalist voor luxehotels. Je schrijft uitgebreide, professionele rapporten die hotelpersoneel helpen om gepersonaliseerde service te bieden. Geef ALLEEN valide JSON terug.' },
+                    { role: 'system', content: 'Je bent een meedogenloos feitelijke VIP-analist. Je haat fluff en speculatie. Je rapporteert alleen wat bewezen is.' },
                     { role: 'user', content: prompt }
                 ],
-                temperature: 0.3,
-                max_tokens: 2000
+                temperature: 0.1,
+                max_tokens: 2500,
+                response_format: { type: "json_object" }
             }, { timeout: 45000 });
 
             const content = response.choices[0]?.message?.content;
             if (!content) return this.basicAnalysis(linkedinInfo);
 
-            const jsonMatch = content.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) return this.basicAnalysis(linkedinInfo);
+            const result = JSON.parse(content);
 
-            return JSON.parse(jsonMatch[0]);
+            // Flatten generic fields for backward compatibility while keeping confidence data
+            return {
+                ...result,
+                vip_score: result.vip_score.value,
+                industry: result.industry.value,
+                company_size: result.company_size.value,
+                is_owner: result.is_owner.value,
+                employment_type: result.employment_type.value,
+                influence_level: result.influence_level.value,
+                net_worth_estimate: result.net_worth_estimate.value,
+                confidence_scores: {
+                    vip_score: result.vip_score.confidence,
+                    industry: result.industry.confidence,
+                    is_owner: result.is_owner.confidence
+                }
+            };
         } catch (error) {
             console.error('AI analysis error:', error);
             return this.basicAnalysis(linkedinInfo);
         }
     }
+
 
     /**
      * Specialized analysis that incorporates manual research findings provided by the user.
@@ -960,7 +1613,7 @@ BESTAANDE RESEARCH DATA:
 - Full Report (bestaand): ${existingResearch.full_report ? 'Beschikbaar' : 'Niet beschikbaar'}
 `;
 
-            const prompt = `Je bent een VIP-gastanalist voor een 5-sterren luxe hotel. Een collega heeft HANDMATIG aanvullende informatie gevonden over een gast. Jouw taak is om deze nieuwe informatie te combineren met de bestaande research data om een INTERACTIEF en UITGEBREIDER rapport te genereren.
+            const prompt = `Je bent een VIP-gastanalist voor een 5-sterren luxe hotel. Een collega heeft HANDMATIG aanvullende informatie gevonden over een gast. Jouw taak is om deze nieuwe informatie te combineren met de bestaande research data om een premium rapport te genereren.
 
 GASTINFORMATIE:
 Naam: ${guest.full_name}
@@ -973,11 +1626,13 @@ NIEUWE HANDMATIG GEVONDEN INFORMATIE (PRIORITEIT):
 ${customInput}
 
 INSTRUCTIES:
-1. De NIEUWE HANDMATIEGE INFORMATIE is leidend en vaak actueler of specifieker dan de automatische research.
-2. Schrijf een NIEUW UITGEBREID RAPPORT (full_report) dat alle info integreert.
-3. Herbereken de VIP_SCORE (1-10) op basis van de GECOMBINEERDE inzichten.
-4. Schrijf in professioneel Nederlands.
-5. Het rapport moet MINIMAAL 500 woorden bevatten en zeer gedetailleerd zijn voor hotel management.
+1. De NIEUWE HANDMATIGE INFORMATIE is leidend en vaak actueler of specifieker.
+2. Schrijf feitelijk en zakelijk. GEEN SPECULATIE of fluff.
+3. GEEN NULL: Gebruik nooit het woord "null" in de beschrijvende teksten. Als informatie ontbreekt, laat het weg uit het verhaal zodat het natuurlijk leest.
+4. GETALLEN: Formatteer getallen compact (bijv. 10k, 5m).
+5. GEPERSONALISEERDE AANBEVELINGEN: Maak deze zeer specifiek en uitgebreid gebaseerd op alle info.
+6. Schrijf in professioneel Nederlands.
+7. Het rapport moet zeer gedetailleerd zijn voor hotel management.
 
 Genereer een GEDETAILLEERD JSON-antwoord:
 {
@@ -1011,10 +1666,17 @@ Genereer een GEDETAILLEERD JSON-antwoord:
     },
     "service_recommendations": {
       "priority_level": "[Standaard/Verhoogd/VIP/Ultra-VIP]",
-      "special_attention": "[details]",
-      "potential_interests": "[details]",
-      "communication_style": "[details]",
-      "gift_suggestions": "[details]"
+      "quick_win": "[Meest impactvolle directe actie]",
+      "categories": [
+        {
+          "title": "Gecombineerde Inzichten",
+          "items": ["[item]", "[item]"]
+        },
+        {
+          "title": "Nieuwe Kansen",
+          "items": ["[item]", "[item]"]
+        }
+      ]
     },
     "additional_notes": "[gecombineerde extra relevante informatie]"
   }
@@ -1069,55 +1731,219 @@ Genereer een GEDETAILLEERD JSON-antwoord:
 
     /**
      * Main search function for guest research
-     * Focuses on LinkedIn as primary source, but searches social media for celebrities
+     * FREE-FIRST STRATEGY: 
+     * 1. Knowledge Graph (Instant Celeb Detection)
+     * 2. DuckDuckGo (Free-with-Captcha research)
+     * 3. AI Evaluation
+     * 4. Brave Search (Premium Fallback)
      */
     async searchGuest(guest) {
         console.log(`🔍 Researching: ${guest.full_name}`);
 
-        // Search LinkedIn via SerpAPI
-        const linkedinInfo = await this.searchLinkedIn(guest);
-        console.log(`💼 LinkedIn: ${linkedinInfo.bestMatch ? 'Found' : 'Not found'}`);
+        // ============================================
+        // STEP 1: Knowledge Graph (INSTANT FREE CHECK)
+        // ============================================
+        console.log('📚 Checking Knowledge Graph for celebrity status...');
+        const celebrityInfo = await this.detectCelebrity(guest);
 
-        // Detect if this is a celebrity - this affects how we search
-        const celebrityInfo = await this.detectCelebrity(guest, linkedinInfo);
+        // If it's a high-confidence celebrity, we still want socials but might skip heavy generic search
+        let searchResults = [];
+        let aiResult = null;
+        let linkedinInfo = { candidates: [], bestMatch: null, needsReview: false };
+        let fallbackMatch = null;
+
+        // ============================================
+        // CELEBRITY EARLY-EXIT: Skip LinkedIn for entertainment/sports/media
+        // These categories don't need professional background - their fame IS the info.
+        // Business and politics still get LinkedIn search (professional context is relevant).
+        // ============================================
+        const skipLinkedInCategories = ['entertainment', 'sports', 'media'];
+        if (celebrityInfo.isCelebrity && celebrityInfo.confidence >= 0.85 &&
+            skipLinkedInCategories.includes(celebrityInfo.category)) {
+            console.log(`🌟 ${celebrityInfo.category.toUpperCase()} celebrity detected: ${celebrityInfo.knownFor}`);
+            console.log(`⏭️ Skipping LinkedIn search - celebrity status is sufficient.`);
+            // Go directly to finalizeResearch which handles social media for celebrities
+            return this.finalizeResearch(guest, linkedinInfo, celebrityInfo, null);
+        }
+
+        // ============================================
+        // STEP 2: DuckDuckGo Multi-Search (FREE PRIMARY)
+        // ============================================
+        console.log('🦆 Starting free-tier research (DuckDuckGo)...');
+        const ddgResults = await duckDuckGo.multiSearch(guest);
+
+        if (ddgResults.length > 0) {
+            console.log(`🔍 Evaluating ${ddgResults.length} DuckDuckGo results via AI...`);
+            aiResult = await this.selectBestMatchWithAI(guest, ddgResults);
+
+            if (aiResult && aiResult.confidence >= 0.8) {
+                console.log(`✨ Confident match found via DuckDuckGo! (${Math.round(aiResult.confidence * 100)}%)`);
+                fallbackMatch = aiResult;
+
+                // Check if it's a LinkedIn profile
+                if (aiResult.url?.includes('linkedin.com/in/')) {
+                    linkedinInfo.bestMatch = {
+                        url: aiResult.url,
+                        title: aiResult.title,
+                        snippet: aiResult.snippet,
+                        jobTitle: aiResult.jobTitle,
+                        company: aiResult.company
+                    };
+                    linkedinInfo.candidates = [linkedinInfo.bestMatch];
+                    fallbackMatch = null;
+                    console.log('💼 Found LinkedIn profile via DuckDuckGo!');
+
+                    // DEEP SCRAPE LINKEDIN FOR REAL HEADLINE
+                    const realHeadline = await duckDuckGo.scrapeLinkedInHeadline(aiResult.url);
+                    if (realHeadline) {
+                        console.log(`📝 Enriched with real headline: "${realHeadline}"`);
+                        // Parse headline into job/company
+                        const headlineParts = realHeadline.split(' - ');
+                        if (headlineParts.length >= 2) {
+                            linkedinInfo.bestMatch.jobTitle = headlineParts[0].trim();
+                            linkedinInfo.bestMatch.company = headlineParts.slice(1).join(' - ').trim();
+                        } else {
+                            linkedinInfo.bestMatch.jobTitle = realHeadline;
+                        }
+                    }
+
+                    // IF WE HAVE A CONFIDENT MATCH, WE STOP HERE (Cost Control)
+                    return this.finalizeResearch(guest, linkedinInfo, celebrityInfo, fallbackMatch);
+                }
+            }
+        }
+
+        // ============================================
+        // STEP 3: Brave Search (PREMIUM FALLBACK)
+        // ============================================
+        // Only run if we don't have a high-confidence LinkedIn match yet
+        if (!linkedinInfo.bestMatch) {
+            console.log('🔄 No confident match found via DDG, falling back to Brave Search...');
+            const braveResults = await braveSearch.multiSearch(guest);
+
+            if (braveResults.length > 0) {
+                console.log(`🔍 Evaluating ${braveResults.length} Brave results via AI...`);
+                const braveAiMatch = await this.selectBestMatchWithAI(guest, braveResults);
+
+                if (braveAiMatch && (!aiResult || braveAiMatch.confidence > aiResult.confidence)) {
+                    console.log(`🦁 Brave found a better match! (${Math.round(braveAiMatch.confidence * 100)}%)`);
+                    aiResult = braveAiMatch;
+                    fallbackMatch = aiResult;
+
+                    if (aiResult.url?.includes('linkedin.com/in/')) {
+                        linkedinInfo.bestMatch = {
+                            url: aiResult.url,
+                            title: aiResult.title,
+                            snippet: aiResult.snippet,
+                            jobTitle: aiResult.jobTitle,
+                            company: aiResult.company
+                        };
+                        linkedinInfo.candidates = [linkedinInfo.bestMatch];
+                        fallbackMatch = null;
+                    }
+                }
+            }
+        }
+
+        return this.finalizeResearch(guest, linkedinInfo, celebrityInfo, fallbackMatch);
+    }
+
+    /**
+     * Helper to wrap up the research process
+     */
+    async finalizeResearch(guest, linkedinInfo, celebrityInfo, fallbackMatch) {
+        // Deep scrape if it's a fallback match (not LinkedIn)
+        if (fallbackMatch && fallbackMatch.url && !fallbackMatch.url.includes('linkedin.com')) {
+            const deepContent = await duckDuckGo.fetchPageContent(fallbackMatch.url, 8000);
+            if (deepContent) {
+                fallbackMatch.deepContent = deepContent;
+            }
+        }
+
+        // ============================================
+        // STEP 3: Email Domain Analysis (BONUS INFO)
+        // ============================================
+        let emailDomainInfo = null;
+        if (guest.email) {
+            emailDomainInfo = await this.extractCompanyFromEmail(guest);
+        }
+
+        // Note: celebrityInfo is already fetched at the start of searchGuest and passed here
+
 
         // Initialize social media results
         let instagramResult = { url: null, handle: null, followers: null };
         let twitterResult = { url: null, handle: null, followers: null };
+        // -----------------------------------------------
+        // STEP 2: CELEBRITY DETECTION (EARLY EXIT)
+        // -----------------------------------------------
+        // If we are 100% sure it is a celebrity (e.g. via Knowledge Graph), we might skip detailed LinkedIn hunting
+        // or ensure we only accept social accounts that MATCH that celebrity status.
 
-        // For celebrities, especially in entertainment, social media is crucial
-        if (celebrityInfo.isCelebrity && celebrityInfo.confidence >= 0.7) {
-            console.log(`⭐ Celebrity detected: ${celebrityInfo.knownFor || celebrityInfo.category}`);
+        if (celebrityInfo.isCelebrity && celebrityInfo.confidence >= 0.9) {
+            console.log(`🌟 Confirmed Celebrity: ${guest.full_name} (${celebrityInfo.knownFor}). Adjusting search strategy...`);
+            // We can still try to find socials, but we must be VERY STRICT.
+        }
 
-            // Search based on priority platform
+        // ============================================
+        // STEP 3: SOCIAL MEDIA DISCOVERY
+        // ============================================
+        // BUSINESS RULE: Skip social media for standard business people.
+        // Their Instagram/Twitter is likely personal and not useful for hotel staff.
+        // Only search socials for:
+        // - Confirmed celebrities (entertainment, sports, media)
+        // - People with public online presence (high VIP score indicators)
+
+        const shouldSearchSocials = this.shouldSearchSocialMedia(celebrityInfo, linkedinInfo);
+
+        if (shouldSearchSocials) {
+            console.log(`🔍 Searching social media presence...`);
+
+            // Determine priority based on celebrity type (or default)
             const priority = celebrityInfo.socialMediaPriority || 'both';
 
             if (priority === 'instagram' || priority === 'both') {
                 instagramResult = await this.searchInstagram(guest);
+                // Verify celebrity socials
+                if (celebrityInfo.isCelebrity) {
+                    instagramResult = await this.verifySocialMediaRelevance(guest, instagramResult, celebrityInfo, 'instagram');
+                }
             }
 
             if (priority === 'twitter' || priority === 'both') {
                 twitterResult = await this.searchTwitter(guest);
+                // Verify celebrity socials
+                if (celebrityInfo.isCelebrity) {
+                    twitterResult = await this.verifySocialMediaRelevance(guest, twitterResult, celebrityInfo, 'twitter');
+                }
             }
 
-            // If nothing found on priority platform, try the other
+            // If nothing found on priority platform, try the other as fallback
             if (priority === 'instagram' && !instagramResult.url) {
                 twitterResult = await this.searchTwitter(guest);
             } else if (priority === 'twitter' && !twitterResult.url) {
                 instagramResult = await this.searchInstagram(guest);
             }
-        } else if (!linkedinInfo.bestMatch) {
-            // For non-celebrities without LinkedIn, still try to find some social presence
-            console.log(`🔍 No LinkedIn found, trying social media search...`);
-            twitterResult = await this.searchTwitter(guest);
-            if (!twitterResult.url) {
-                instagramResult = await this.searchInstagram(guest);
-            }
+        } else {
+            console.log(`📋 Skipping social media search for business guest (LinkedIn is sufficient)`);
         }
+        // -----------------------------------------------
 
-        // --- NEW: Company Research ---
+        // --- NEW: News Research ---
+        const newsInfo = await this.searchRecentNews(guest);
+        // --------------------------
+
+        // --- Company Research ---
+        // SKIP for entertainment/sports/media celebrities - they don't need business data
         let companyInfo = null;
-        if (guest.company || (linkedinInfo.bestMatch && linkedinInfo.bestMatch.company)) {
+        const skipCompanyCategories = ['entertainment', 'sports', 'media'];
+        const shouldSkipCompanyResearch = celebrityInfo.isCelebrity &&
+            celebrityInfo.confidence >= 0.85 &&
+            skipCompanyCategories.includes(celebrityInfo.category);
+
+        if (shouldSkipCompanyResearch) {
+            console.log(`⏭️ Skipping company research for ${celebrityInfo.category} celebrity`);
+        } else if (guest.company || (linkedinInfo.bestMatch && linkedinInfo.bestMatch.company)) {
             const targetCompany = guest.company || linkedinInfo.bestMatch.company;
             console.log(`🏢 Researching company: ${targetCompany}`);
             // Pass guest context for regional filtering
@@ -1137,21 +1963,28 @@ Genereer een GEDETAILLEERD JSON-antwoord:
         guest.company_info = companyInfo; // Pass to AI analysis
         // -----------------------------
 
-        // Analyze with AI (include celebrity info for better context)
-        const analysis = await this.analyzeWithAI(guest, linkedinInfo, celebrityInfo);
+        // Analyze with AI (include celebrity info and news for better context)
+        const analysis = await this.analyzeWithAI(guest, linkedinInfo, celebrityInfo, newsInfo, fallbackMatch);
         console.log(`🤖 AI Analysis: VIP Score ${analysis.vip_score}`);
 
         // Get best LinkedIn data
         const bestMatch = linkedinInfo.bestMatch;
 
-        // Use thumbnail from best match if available, otherwise try image search
-        let profilePhotoUrl = bestMatch?.thumbnail || null;
-        if (!profilePhotoUrl && bestMatch?.url) {
-            console.log(`🖼️ No thumbnail in search results, trying image search for ${guest.full_name}`);
-            profilePhotoUrl = await this.findProfilePhoto(guest, bestMatch.url);
-        } else if (!profilePhotoUrl) {
-            console.log(`🖼️ No LinkedIn match, trying general image search for ${guest.full_name}`);
-            profilePhotoUrl = await this.findProfilePhoto(guest);
+        // 📸 PHOTO SELECTION 
+        // Priority: 1. Knowledge Graph (celebrities), 2. Instagram thumbnail, 3. Twitter thumbnail, 4. None
+        let profilePhotoUrl = null;
+
+        if (celebrityInfo.isCelebrity && celebrityInfo.officialImage) {
+            console.log(`🖼️ Using official Knowledge Graph image for ${guest.full_name}`);
+            profilePhotoUrl = celebrityInfo.officialImage;
+        } else if (instagramResult.profilePhoto) {
+            console.log(`🖼️ Using Instagram profile photo for ${guest.full_name}`);
+            profilePhotoUrl = instagramResult.profilePhoto;
+        } else if (twitterResult.profilePhoto) {
+            console.log(`🖼️ Using Twitter profile photo for ${guest.full_name}`);
+            profilePhotoUrl = twitterResult.profilePhoto;
+        } else {
+            console.log(`🖼️ No profile photo found for ${guest.full_name}`);
         }
 
         // Calculate total followers for VIP scoring
@@ -1159,12 +1992,14 @@ Genereer een GEDETAILLEERD JSON-antwoord:
 
         // Prioritize job title and company from social media if LinkedIn not available
         const effectiveJobTitle = bestMatch?.jobTitle ||
+            fallbackMatch?.jobTitle ||
             twitterResult.jobTitle ||
             instagramResult.jobTitle ||
             celebrityInfo.knownFor ||
             null;
 
         const effectiveCompany = bestMatch?.company ||
+            fallbackMatch?.company ||
             twitterResult.company ||
             instagramResult.company ||
             guest.company;
@@ -1173,7 +2008,11 @@ Genereer een GEDETAILLEERD JSON-antwoord:
         const socialMediaLocation = twitterResult.location || instagramResult.location || null;
 
         // Get website from social media if not found elsewhere, or from company info
-        const effectiveWebsite = companyInfo?.website || twitterResult.linkedWebsite || instagramResult.linkedWebsite || null;
+        const effectiveWebsite = companyInfo?.website ||
+            fallbackMatch?.url ||
+            twitterResult.linkedWebsite ||
+            instagramResult.linkedWebsite ||
+            null;
 
         // Use linked Instagram from Twitter if we didn't find Instagram directly
         if (!instagramResult.url && twitterResult.linkedInstagram) {
@@ -1195,13 +2034,27 @@ Genereer een GEDETAILLEERD JSON-antwoord:
             };
         }
 
+        // Check if we found ANY significant data
+        const noResultsFound = !bestMatch &&
+            !celebrityInfo.isCelebrity &&
+            newsInfo.articles?.length === 0 &&
+            !instagramResult.url &&
+            !twitterResult.url &&
+            !fallbackMatch &&
+            !guest.company_info?.deep_info;
+
+        if (noResultsFound) {
+            console.log(`⚠️ No significant information found for ${guest.full_name}`);
+        }
+
         // Build results object with comprehensive social media data
         return {
             profilePhotoUrl: profilePhotoUrl,
             jobTitle: effectiveJobTitle,
             companyName: effectiveCompany,
-            companySize: analysis.company_size || null,
-            isOwner: analysis.is_owner,
+            companySize: emailDomainInfo?.companySize || analysis.company_size || null,
+            isOwner: emailDomainInfo?.isOwner ?? analysis.is_owner,
+            ownerReason: emailDomainInfo?.ownerReason || null,
             employmentType: analysis.employment_type || null,
             industry: analysis.industry || celebrityInfo.category,
             linkedinUrl: bestMatch?.url || null,
@@ -1234,7 +2087,7 @@ Genereer een GEDETAILLEERD JSON-antwoord:
             fullReport: analysis.full_report || null,
             pressMentions: null,
             netWorthEstimate: analysis.net_worth_estimate,
-            followersEstimate: totalFollowers > 0 ? totalFollowers : null,
+            followersEstimate: formatNumber(totalFollowers),
             vipScore: analysis.vip_score,
             influenceLevel: analysis.influence_level,
             isCelebrity: celebrityInfo.isCelebrity,
@@ -1242,10 +2095,17 @@ Genereer een GEDETAILLEERD JSON-antwoord:
             rawResults: [
                 { type: 'linkedin_search', data: linkedinInfo },
                 { type: 'celebrity_detection', data: celebrityInfo },
+                { type: 'news_search', data: newsInfo },
                 { type: 'instagram_search', data: instagramResult },
                 { type: 'twitter_search', data: twitterResult },
+                { type: 'google_fallback', data: fallbackMatch },
+                { type: 'email_domain', data: emailDomainInfo },
                 { type: 'ai_analysis', data: analysis }
-            ]
+            ],
+            emailDomainInfo: emailDomainInfo,
+            newsArticles: newsInfo.articles || [],
+            confidenceScores: analysis.confidence_scores || null,
+            noResultsFound: noResultsFound
         };
     }
 }

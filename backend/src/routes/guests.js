@@ -29,6 +29,7 @@ router.get('/', (req, res) => {
         r.profile_photo_url,
         r.needs_linkedin_review,
         r.linkedin_candidates,
+        r.raw_search_results,
         (SELECT COUNT(*) FROM reservations WHERE guest_id = g.id) as reservation_count
       FROM guests g
       LEFT JOIN research_results r ON r.guest_id = g.id

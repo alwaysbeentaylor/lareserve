@@ -1,8 +1,10 @@
 const OpenAI = require('openai');
+const braveSearch = require('./braveSearch');
+const duckDuckGo = require('./duckDuckGo');
 
 /**
  * Company Scraper service for guest research
- * Vercel-compatible: uses SerpAPI and standard fetch instead of Puppeteer
+ * Uses DuckDuckGo and Brave for reliable web searching and deep scraping
  */
 
 class CompanyScraperService {
@@ -26,7 +28,7 @@ class CompanyScraperService {
      * @param context - Optional context (guestCountry, guestCity) to filter results by region
      */
     async searchCompany(companyName, context = {}) {
-        if (!process.env.SERPAPI_KEY || !companyName) {
+        if (!companyName) {
             return null;
         }
 
@@ -34,112 +36,61 @@ class CompanyScraperService {
             const { guestCountry, guestCity } = context;
             console.log(`🏢 Searching company info for: ${companyName}${guestCountry ? ` (context: ${guestCountry})` : ''}`);
 
-            // Build a regional/context-aware search query
-            let query = `"${companyName}" company`;
-            if (guestCountry) {
-                query += ` ${guestCountry}`;
+            const query = `"${companyName}" company ${guestCountry || ''} ${guestCity || ''} headquarters industry`.trim();
+
+            // DuckDuckGo first (FREE)
+            let results = await duckDuckGo.search(query);
+            if (results.length === 0) {
+                console.log(`🔍 Falling back to Brave for company search: ${companyName}`);
+                results = await braveSearch.search(query, 5);
             }
-            if (guestCity) {
-                query += ` ${guestCity}`;
-            }
-            query += ' headquarters industry';
 
-            const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${process.env.SERPAPI_KEY}&num=8`;
-
-            const response = await fetch(url);
-            const data = await response.json();
-
-            if (data.error) {
-                console.error('SerpAPI company search error:', data.error);
+            if (results.length === 0) {
+                console.log(`❌ No company info found for: ${companyName}`);
                 return null;
             }
 
             // Blocklist: Aggregator and data-selling sites to exclude
             const blockedDomains = [
+                // Data aggregators
                 'privco.com', 'zoominfo.com', 'crunchbase.com', 'dnb.com',
                 'apollo.io', 'leadiq.com', 'lusha.com', 'rocketreach.co',
                 'owler.com', 'craft.co', 'pitchbook.com', 'cbinsights.com',
-                'linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com',
-                'yelp.com', 'tripadvisor.com', 'glassdoor.com', 'indeed.com',
+                // Credit/Financial data sites (junk for our purposes)
+                'creditsafe.com', 'creditriskmonitor.com', 'kompass.com',
+                // Generic directories
+                'linkedin.com', 'facebook.com', 'twitter.com', 'x.com',
+                'yellowpages.', 'yelp.com', 'tripadvisor.com',
+                'glassdoor.com', 'indeed.com', 'monster.com',
+                // Placeholder/unknown domains
+                'unknowncompany.com', 'example.com', 'placeholder.com',
+                // Other aggregators
+                'opencorporates.com', 'companieshouse.gov.uk', 'kvk.nl',
                 'bloomberg.com/profile', 'reuters.com/companies'
             ];
 
-            // 1. Try to get info from knowledge_graph
+            // Filter for the most representative result (preferring official website)
+            const filteredResults = results.filter(r => {
+                const link = r.link.toLowerCase();
+                return !blockedDomains.some(domain => link.includes(domain));
+            });
+
+            const bestResult = filteredResults[0] || results[0];
+
             let info = {
                 name: companyName,
-                website: null,
+                website: bestResult.link,
                 industry: null,
-                description: null,
+                description: bestResult.snippet,
                 size: null,
                 headquarters: null,
-                matchesContext: false,
-                rawResults: data
+                rawResults: results
             };
 
-            if (data.knowledge_graph) {
-                const kg = data.knowledge_graph;
-                info.website = kg.website || kg.links?.find(l => l.title === 'Website')?.link;
-                info.industry = kg.type || kg.industry;
-                info.description = kg.description;
-                info.headquarters = kg.headquarters;
-
-                // Check if headquarters matches guest's region
-                if (guestCountry && kg.headquarters) {
-                    const hq = kg.headquarters.toLowerCase();
-                    const country = guestCountry.toLowerCase();
-                    // European context check
-                    const europeanCountries = ['germany', 'france', 'netherlands', 'belgium', 'austria', 'switzerland', 'italy', 'spain', 'uk', 'united kingdom', 'portugal', 'poland', 'czech', 'denmark', 'sweden', 'norway', 'finland', 'ireland', 'luxembourg', 'monaco', 'duitsland', 'frankrijk', 'nederland', 'belgie', 'oostenrijk', 'zwitserland', 'italie', 'spanje'];
-                    const isEuropeanContext = europeanCountries.some(c => country.includes(c));
-                    const isEuropeanHQ = europeanCountries.some(c => hq.includes(c));
-
-                    if (isEuropeanContext && !isEuropeanHQ && (hq.includes('usa') || hq.includes('united states') || hq.includes('california') || hq.includes('new york'))) {
-                        console.log(`⚠️ Skipping non-European result for European context: HQ in ${kg.headquarters}`);
-                        // Don't use this knowledge graph, try organic results instead
-                        info.website = null;
-                        info.description = null;
-                    } else {
-                        info.matchesContext = true;
-                    }
-                }
-
-                if (kg.employees) info.size = kg.employees;
-            }
-
-            // 2. If no website from knowledge graph, try first organic result (filtered)
-            if (!info.website && data.organic_results) {
-                const results = data.organic_results;
-                // Filter out blocked domains and aggregator sites
-                const filteredResults = results.filter(r => {
-                    if (!r.link) return false;
-                    const link = r.link.toLowerCase();
-                    return !blockedDomains.some(domain => link.includes(domain));
-                });
-
-                // For European context, prefer .de, .nl, .fr, .eu domains
-                let bestResult = null;
-                if (guestCountry) {
-                    const countryLower = guestCountry.toLowerCase();
-                    const europeanTLDs = ['.de', '.nl', '.fr', '.be', '.at', '.ch', '.it', '.es', '.uk', '.co.uk', '.eu', '.pt', '.pl', '.cz', '.dk', '.se', '.no', '.fi', '.ie', '.lu'];
-                    bestResult = filteredResults.find(r =>
-                        europeanTLDs.some(tld => r.link.toLowerCase().includes(tld))
-                    );
-                }
-
-                // Fallback to first filtered result
-                if (!bestResult && filteredResults.length > 0) {
-                    bestResult = filteredResults[0];
-                }
-
-                if (bestResult) {
-                    info.website = bestResult.link;
-                    if (!info.description) info.description = bestResult.snippet;
-                }
-            }
-
-            // 3. Use AI to consolidate information from snippets if Knowledge Graph was sparse
+            // Use AI to consolidate information from snippets
             const openai = this.getOpenAI();
-            if (openai && data.organic_results) {
-                const context = data.organic_results.slice(0, 3).map(r =>
+            if (openai) {
+                const contextText = results.slice(0, 3).map(r =>
                     `Title: ${r.title}\nSnippet: ${r.snippet}`
                 ).join('\n\n');
 
@@ -150,7 +101,7 @@ class CompanyScraperService {
 4. Their main website URL
 
 Search Results:
-${context}
+${contextText}
 
 Return JSON: { "industry": string, "size": string, "description": string, "website": string }`;
 
@@ -165,10 +116,10 @@ Return JSON: { "industry": string, "size": string, "description": string, "websi
                 });
 
                 const consolidated = JSON.parse(aiResponse.choices[0].message.content);
-                if (!info.industry) info.industry = consolidated.industry;
-                if (!info.size) info.size = consolidated.size;
-                if (!info.description) info.description = consolidated.description;
-                if (!info.website) info.website = consolidated.website;
+                info.industry = consolidated.industry || info.industry;
+                info.size = consolidated.size || info.size;
+                info.description = consolidated.description || info.description;
+                info.website = consolidated.website || info.website;
             }
 
             return info;
@@ -185,60 +136,46 @@ Return JSON: { "industry": string, "size": string, "description": string, "websi
         if (!url) return null;
 
         try {
-            console.log(`🌐 Fetching website content: ${url}`);
-            const response = await fetch(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5'
-                },
-                redirect: 'follow',
-                signal: AbortSignal.timeout(10000)
-            });
+            console.log(`🏢 Deep scraping company website: ${url}`);
+            const text = await duckDuckGo.fetchPageContent(url, 5000);
 
-            if (!response.ok) return null;
-
-            const html = await response.text();
-
-            // Simple text extraction (strip script/style tags and then basic HTML tags)
-            const cleanText = html
-                .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, '')
-                .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, '')
-                .replace(/<[^>]+>/g, ' ')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .substring(0, 5000); // Send first 5k chars to AI
-
-            const openai = this.getOpenAI();
-            if (openai && cleanText.length > 100) {
-                const prompt = `Analyze this company website content and provide a professional summary:
-${cleanText}
-
-Return JSON:
-{
-  "mission": "Core mission or value proposition",
-  "products_services": ["list", "of", "main", "offerings"],
-  "target_market": "Who they serve",
-  "tone": "Professional/Innovative/Formal/etc",
-  "key_executives": ["mentions of leadership if found"]
-}`;
-
-                const aiResponse = await openai.chat.completions.create({
-                    model: 'gpt-4o-mini',
-                    messages: [
-                        { role: 'system', content: 'You are a business research assistant.' },
-                        { role: 'user', content: prompt }
-                    ],
-                    temperature: 0.1,
-                    response_format: { type: "json_object" }
-                });
-
-                return JSON.parse(aiResponse.choices[0].message.content);
+            if (!text || text.length < 200) {
+                console.log('⚠️ Website content too short or failed to fetch');
+                return null;
             }
 
-            return null;
+            const openai = this.getOpenAI();
+            if (!openai) return null;
+
+            const prompt = `Extract structured business info from this company website text:
+            
+            URL: ${url}
+            
+            TEXT:
+            ${text.substring(0, 4000)}
+            
+            Return JSON:
+            {
+                "mission": "Brief company mission/vision",
+                "products_services": ["service 1", "service 2", ...],
+                "target_market": "Who are their customers?",
+                "key_people": ["Founders/Leaders mentioned"],
+                "tone_of_voice": "Professional/Creative/Traditional/etc"
+            }`;
+
+            const response = await openai.chat.completions.create({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: 'You are a business analyst.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.1,
+                response_format: { type: "json_object" }
+            });
+
+            return JSON.parse(response.choices[0].message.content);
         } catch (error) {
-            console.error(`Error scraping website ${url}:`, error.message);
+            console.error('Scrape website error:', error);
             return null;
         }
     }

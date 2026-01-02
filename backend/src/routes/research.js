@@ -67,11 +67,13 @@ router.post('/:guestId', async (req, res) => {
           instagram_url = ?,
           instagram_bio = ?,
           instagram_location = ?,
+          instagram_followers = ?,
           twitter_handle = ?,
           twitter_url = ?,
           twitter_bio = ?,
           twitter_location = ?,
           twitter_member_since = ?,
+          twitter_followers = ?,
           social_media_location = ?,
           facebook_url = ?,
           youtube_url = ?,
@@ -84,6 +86,7 @@ router.post('/:guestId', async (req, res) => {
           vip_score = ?,
           influence_level = ?,
           raw_search_results = ?,
+          no_results_found = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE guest_id = ?
        `).run(
@@ -102,11 +105,13 @@ router.post('/:guestId', async (req, res) => {
                 searchResults.instagramUrl,
                 searchResults.instagramBio,
                 searchResults.instagramLocation,
+                searchResults.instagramFollowers,
                 searchResults.twitterHandle,
                 searchResults.twitterUrl,
                 searchResults.twitterBio,
                 searchResults.twitterLocation,
                 searchResults.twitterMemberSince,
+                searchResults.twitterFollowers,
                 searchResults.socialMediaLocation,
                 searchResults.facebookUrl,
                 searchResults.youtubeUrl,
@@ -119,6 +124,7 @@ router.post('/:guestId', async (req, res) => {
                 vipScore,
                 influenceLevel,
                 JSON.stringify(searchResults.rawResults),
+                searchResults.noResultsFound ? 1 : 0,
                 guestId
             );
         } else {
@@ -126,11 +132,11 @@ router.post('/:guestId', async (req, res) => {
         INSERT INTO research_results (
           guest_id, profile_photo_url, job_title, company_name, company_size, is_owner, employment_type,
           industry, linkedin_url, linkedin_connections, linkedin_candidates, needs_linkedin_review,
-          instagram_handle, instagram_url, instagram_bio, instagram_location,
-          twitter_handle, twitter_url, twitter_bio, twitter_location, twitter_member_since,
+          instagram_handle, instagram_url, instagram_bio, instagram_location, instagram_followers,
+          twitter_handle, twitter_url, twitter_bio, twitter_location, twitter_member_since, twitter_followers,
           social_media_location, facebook_url, youtube_url, website_url,
-          notable_info, full_report, press_mentions, net_worth, followers_estimate, vip_score, influence_level, raw_search_results
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          notable_info, full_report, press_mentions, net_worth, followers_estimate, vip_score, influence_level, raw_search_results, no_results_found
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
                 guestId,
                 searchResults.profilePhotoUrl,
@@ -148,11 +154,13 @@ router.post('/:guestId', async (req, res) => {
                 searchResults.instagramUrl,
                 searchResults.instagramBio,
                 searchResults.instagramLocation,
+                searchResults.instagramFollowers,
                 searchResults.twitterHandle,
                 searchResults.twitterUrl,
                 searchResults.twitterBio,
                 searchResults.twitterLocation,
                 searchResults.twitterMemberSince,
+                searchResults.twitterFollowers,
                 searchResults.socialMediaLocation,
                 searchResults.facebookUrl,
                 searchResults.youtubeUrl,
@@ -164,7 +172,8 @@ router.post('/:guestId', async (req, res) => {
                 searchResults.followersEstimate,
                 vipScore,
                 influenceLevel,
-                JSON.stringify(searchResults.rawResults)
+                JSON.stringify(searchResults.rawResults),
+                searchResults.noResultsFound ? 1 : 0
             );
         }
 
@@ -179,6 +188,28 @@ router.post('/:guestId', async (req, res) => {
 
     } catch (error) {
         console.error('Research error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// DELETE /api/research/:guestId - Clear research for a guest
+router.delete('/:guestId', (req, res) => {
+    try {
+        const { guestId } = req.params;
+
+        const result = db.prepare('DELETE FROM research_results WHERE guest_id = ?').run(guestId);
+
+        if (result.changes === 0) {
+            return res.status(404).json({ error: 'Geen research gevonden om te verwijderen' });
+        }
+
+        res.json({
+            success: true,
+            message: 'Onderzoeksresultaten succesvol verwijderd'
+        });
+
+    } catch (error) {
+        console.error('Clear research error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -233,6 +264,7 @@ router.post('/:guestId/ai-analyze', async (req, res) => {
                 influence_level = ?,
                 net_worth = ?,
                 full_report = ?,
+                no_results_found = 0,
                 updated_at = CURRENT_TIMESTAMP
             WHERE guest_id = ?
         `).run(
@@ -342,12 +374,14 @@ router.post('/batch', async (req, res) => {
               profile_photo_url = ?, job_title = ?, company_name = ?, company_size = ?,
               industry = ?, linkedin_url = ?, linkedin_connections = ?, 
               linkedin_candidates = ?, needs_linkedin_review = ?,
-              instagram_handle = ?, instagram_url = ?,
-              twitter_handle = ?, twitter_url = ?,
+              instagram_handle = ?, instagram_url = ?, instagram_followers = ?,
+              twitter_handle = ?, twitter_url = ?, twitter_followers = ?,
               website_url = ?, notable_info = ?, full_report = ?, press_mentions = ?,
               net_worth = ?, followers_estimate = ?,
               vip_score = ?, influence_level = ?,
-              raw_search_results = ?, updated_at = CURRENT_TIMESTAMP
+              raw_search_results = ?, 
+              no_results_found = ?,
+              updated_at = CURRENT_TIMESTAMP
             WHERE guest_id = ?
           `).run(
                         searchResults.profilePhotoUrl, searchResults.jobTitle, searchResults.companyName,
@@ -355,13 +389,15 @@ router.post('/batch', async (req, res) => {
                         searchResults.linkedinConnections,
                         JSON.stringify(searchResults.linkedinCandidates || []),
                         searchResults.needsLinkedInReview ? 1 : 0,
-                        searchResults.instagramHandle, searchResults.instagramUrl,
-                        searchResults.twitterHandle, searchResults.twitterUrl,
+                        searchResults.instagramHandle, searchResults.instagramUrl, searchResults.instagramFollowers,
+                        searchResults.twitterHandle, searchResults.twitterUrl, searchResults.twitterFollowers,
                         searchResults.websiteUrl,
                         searchResults.notableInfo, JSON.stringify(searchResults.fullReport || null),
                         searchResults.pressMentions, searchResults.netWorthEstimate, searchResults.followersEstimate,
                         vipScore, influenceLevel,
-                        JSON.stringify(searchResults.rawResults), guestId
+                        JSON.stringify(searchResults.rawResults),
+                        searchResults.noResultsFound ? 1 : 0,
+                        guestId
                     );
                 } else {
                     db.prepare(`
@@ -369,23 +405,25 @@ router.post('/batch', async (req, res) => {
               guest_id, profile_photo_url, job_title, company_name, company_size,
               industry, linkedin_url, linkedin_connections, 
               linkedin_candidates, needs_linkedin_review,
-              instagram_handle, instagram_url, twitter_handle, twitter_url,
+              instagram_handle, instagram_url, instagram_followers, 
+              twitter_handle, twitter_url, twitter_followers,
               website_url, notable_info, full_report, press_mentions,
               net_worth, followers_estimate,
-              vip_score, influence_level, raw_search_results
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              vip_score, influence_level, raw_search_results, no_results_found
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
                         guestId, searchResults.profilePhotoUrl, searchResults.jobTitle, searchResults.companyName,
                         searchResults.companySize, searchResults.industry, searchResults.linkedinUrl,
                         searchResults.linkedinConnections,
                         JSON.stringify(searchResults.linkedinCandidates || []),
                         searchResults.needsLinkedInReview ? 1 : 0,
-                        searchResults.instagramHandle, searchResults.instagramUrl,
-                        searchResults.twitterHandle, searchResults.twitterUrl,
+                        searchResults.instagramHandle, searchResults.instagramUrl, searchResults.instagramFollowers,
+                        searchResults.twitterHandle, searchResults.twitterUrl, searchResults.twitterFollowers,
                         searchResults.websiteUrl,
                         searchResults.notableInfo, JSON.stringify(searchResults.fullReport || null),
                         searchResults.pressMentions, searchResults.netWorthEstimate, searchResults.followersEstimate,
-                        vipScore, influenceLevel, JSON.stringify(searchResults.rawResults)
+                        vipScore, influenceLevel, JSON.stringify(searchResults.rawResults),
+                        searchResults.noResultsFound ? 1 : 0
                     );
                 }
 
@@ -482,11 +520,14 @@ function resumeActiveQueues() {
 
 // POST /api/research/queue/start - Start async enrichment queue
 router.post('/queue/start', (req, res) => {
-    const { guestIds, batchId } = req.body;
+    const { guestIds, batchId, concurrency = 3 } = req.body;
 
     if (!guestIds || !Array.isArray(guestIds) || guestIds.length === 0) {
         return res.status(400).json({ error: 'Geen gasten geselecteerd' });
     }
+
+    // Limit concurrency to prevent overload (max 5)
+    const actualConcurrency = Math.min(Math.max(1, parseInt(concurrency) || 1), 5);
 
     const queueId = batchId || `queue-${Date.now()}`;
 
@@ -495,11 +536,13 @@ router.post('/queue/start', (req, res) => {
         completed: 0,
         current: null,
         currentName: null,
+        currentProcessing: [], // Track multiple guests being processed
         errors: [],
         status: 'running',
         startedAt: new Date().toISOString(),
         guestIds: guestIds,
-        nextIndex: 0
+        nextIndex: 0,
+        concurrency: actualConcurrency
     };
 
     // Initialize queue status
@@ -508,20 +551,29 @@ router.post('/queue/start', (req, res) => {
     // Persist to DB
     saveQueueToDb(queueId, queueData);
 
-    // Start async processing
-    processEnrichmentQueue(queueId, guestIds);
+    // Start async processing (parallel or sequential based on concurrency)
+    if (actualConcurrency > 1) {
+        console.log(`🚀 Starting parallel enrichment with concurrency: ${actualConcurrency}`);
+        processEnrichmentQueueParallel(queueId, guestIds, actualConcurrency);
+    } else {
+        processEnrichmentQueue(queueId, guestIds);
+    }
 
     res.json({
         success: true,
         queueId,
         total: guestIds.length,
-        message: 'Enrichment gestart'
+        concurrency: actualConcurrency,
+        message: `Enrichment gestart${actualConcurrency > 1 ? ` (${actualConcurrency}x parallel)` : ''}`
     });
 });
+
 
 // POST /api/research/queue/start-pending - Start enrichment for all guests who don't have results
 router.post('/queue/start-pending', (req, res) => {
     try {
+        const { concurrency = 3 } = req.body || {};
+
         const pendingGuests = db.prepare(`
             SELECT id FROM guests g
             WHERE NOT EXISTS (SELECT 1 FROM research_results r WHERE r.guest_id = g.id)
@@ -535,6 +587,9 @@ router.post('/queue/start-pending', (req, res) => {
             });
         }
 
+        // Limit concurrency to prevent overload (max 5)
+        const actualConcurrency = Math.min(Math.max(1, parseInt(concurrency) || 1), 5);
+
         const guestIds = pendingGuests.map(g => g.id);
         const queueId = `pending-${Date.now()}`;
 
@@ -543,11 +598,13 @@ router.post('/queue/start-pending', (req, res) => {
             completed: 0,
             current: null,
             currentName: null,
+            currentProcessing: [],
             errors: [],
             status: 'running',
             startedAt: new Date().toISOString(),
             guestIds: guestIds,
-            nextIndex: 0
+            nextIndex: 0,
+            concurrency: actualConcurrency
         };
 
         // Initialize queue status
@@ -556,14 +613,20 @@ router.post('/queue/start-pending', (req, res) => {
         // Persist to DB
         saveQueueToDb(queueId, queueData);
 
-        // Start async processing
-        processEnrichmentQueue(queueId, guestIds);
+        // Start async processing (parallel or sequential)
+        if (actualConcurrency > 1) {
+            console.log(`🚀 Starting parallel enrichment with concurrency: ${actualConcurrency}`);
+            processEnrichmentQueueParallel(queueId, guestIds, actualConcurrency);
+        } else {
+            processEnrichmentQueue(queueId, guestIds);
+        }
 
         res.json({
             success: true,
             queueId,
             total: guestIds.length,
-            message: `Enrichment gestart voor ${guestIds.length} gasten`
+            concurrency: actualConcurrency,
+            message: `Enrichment gestart voor ${guestIds.length} gasten${actualConcurrency > 1 ? ` (${actualConcurrency}x parallel)` : ''}`
         });
 
     } catch (error) {
@@ -571,6 +634,7 @@ router.post('/queue/start-pending', (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
 
 // Async queue processor
 async function processEnrichmentQueue(queueId, guestIds, startIndex = 0) {
@@ -667,22 +731,24 @@ async function processEnrichmentQueue(queueId, guestIds, startIndex = 0) {
                     guest_id, profile_photo_url, job_title, company_name, company_size,
                     industry, linkedin_url, linkedin_connections, 
                     linkedin_candidates, needs_linkedin_review,
-                    instagram_handle, instagram_url, twitter_handle, twitter_url,
+                    instagram_handle, instagram_url, instagram_followers,
+                    twitter_handle, twitter_url, twitter_followers,
                     website_url, notable_info, full_report, press_mentions,
-                    net_worth, followers_estimate, vip_score, influence_level, raw_search_results
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    net_worth, followers_estimate, vip_score, influence_level, raw_search_results, no_results_found
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
                 guestId, searchResults.profilePhotoUrl, searchResults.jobTitle, searchResults.companyName,
                 searchResults.companySize, searchResults.industry, searchResults.linkedinUrl,
                 searchResults.linkedinConnections,
                 JSON.stringify(searchResults.linkedinCandidates || []),
                 searchResults.needsLinkedInReview ? 1 : 0,
-                searchResults.instagramHandle, searchResults.instagramUrl,
-                searchResults.twitterHandle, searchResults.twitterUrl,
+                searchResults.instagramHandle, searchResults.instagramUrl, searchResults.instagramFollowers,
+                searchResults.twitterHandle, searchResults.twitterUrl, searchResults.twitterFollowers,
                 searchResults.websiteUrl,
                 searchResults.notableInfo, JSON.stringify(searchResults.fullReport || null),
                 searchResults.pressMentions, searchResults.netWorthEstimate, searchResults.followersEstimate,
-                vipScore, influenceLevel, JSON.stringify(searchResults.rawResults)
+                vipScore, influenceLevel, JSON.stringify(searchResults.rawResults),
+                searchResults.noResultsFound ? 1 : 0
             );
 
             queue.completed++;
@@ -728,6 +794,142 @@ async function processEnrichmentQueue(queueId, guestIds, startIndex = 0) {
         console.log(`🎉 Enrichment queue ${queueId} completed: ${queue.completed}/${queue.total}`);
     }
 }
+
+// Parallel queue processor - processes multiple guests at once
+async function processEnrichmentQueueParallel(queueId, guestIds, concurrency = 3) {
+    const queue = enrichmentQueues.get(queueId);
+    if (!queue) return;
+
+    console.log(`🚀 Starting parallel processing of ${guestIds.length} guests with concurrency ${concurrency}`);
+
+    // Helper function to process a single guest
+    async function processGuest(guestId, index) {
+        // Check if queue was stopped
+        if (queue.status === 'stopped') {
+            return { skipped: true };
+        }
+
+        // Wait if paused
+        while (queue.status === 'paused') {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            if (queue.status === 'stopped') return { skipped: true };
+        }
+
+        try {
+            const guest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+            if (!guest) {
+                return { guestId, error: 'Gast niet gevonden' };
+            }
+
+            // Track current processing
+            queue.currentProcessing.push({ guestId, name: guest.full_name });
+
+            // Check existing research
+            const existingResearch = db.prepare('SELECT id FROM research_results WHERE guest_id = ?').get(guestId);
+            if (existingResearch) {
+                console.log(`⏩ Skipping ${guest.full_name} (already researched)`);
+                return { guestId, skipped: true, existing: true };
+            }
+
+            console.log(`🔍 [${index + 1}/${guestIds.length}] Enriching ${guest.full_name}`);
+
+            // Perform smart search with timeout
+            const researchPromise = smartSearch.searchGuest(guest);
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Research timeout (180s)')), 180000)
+            );
+
+            const searchResults = await Promise.race([researchPromise, timeoutPromise]);
+            const vipScore = searchResults.vipScore || vipScorer.calculate(searchResults);
+            const influenceLevel = searchResults.influenceLevel || vipScorer.getInfluenceLevel(vipScore);
+
+            // Save results
+            db.prepare(`
+                INSERT INTO research_results (
+                    guest_id, profile_photo_url, job_title, company_name, company_size,
+                    industry, linkedin_url, linkedin_connections, 
+                    linkedin_candidates, needs_linkedin_review,
+                    instagram_handle, instagram_url, instagram_followers,
+                    twitter_handle, twitter_url, twitter_followers,
+                    website_url, notable_info, full_report, press_mentions,
+                    net_worth, followers_estimate, vip_score, influence_level, raw_search_results
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                guestId, searchResults.profilePhotoUrl, searchResults.jobTitle, searchResults.companyName,
+                searchResults.companySize, searchResults.industry, searchResults.linkedinUrl,
+                searchResults.linkedinConnections,
+                JSON.stringify(searchResults.linkedinCandidates || []),
+                searchResults.needsLinkedInReview ? 1 : 0,
+                searchResults.instagramHandle, searchResults.instagramUrl, searchResults.instagramFollowers,
+                searchResults.twitterHandle, searchResults.twitterUrl, searchResults.twitterFollowers,
+                searchResults.websiteUrl,
+                searchResults.notableInfo, JSON.stringify(searchResults.fullReport || null),
+                searchResults.pressMentions, searchResults.netWorthEstimate, searchResults.followersEstimate,
+                vipScore, influenceLevel, JSON.stringify(searchResults.rawResults)
+            );
+
+            console.log(`✅ Completed ${guest.full_name} - VIP Score: ${vipScore}`);
+            return { guestId, success: true, vipScore };
+
+        } catch (err) {
+            console.error(`❌ Error enriching guest ${guestId}:`, err.message);
+
+            // Mark as "No data found" in DB
+            try {
+                db.prepare(`
+                    INSERT OR IGNORE INTO research_results (
+                        guest_id, notable_info, vip_score, influence_level
+                    ) VALUES (?, ?, 0, 'None')
+                `).run(guestId, `Geen gegevens gevonden (${err.message})`);
+            } catch (dbErr) {
+                // Ignore DB errors
+            }
+
+            return { guestId, error: err.message };
+        } finally {
+            // Remove from currentProcessing
+            queue.currentProcessing = queue.currentProcessing.filter(p => p.guestId !== guestId);
+        }
+    }
+
+    // Process guests in batches with controlled concurrency
+    const results = [];
+    for (let i = 0; i < guestIds.length; i += concurrency) {
+        if (queue.status === 'stopped') break;
+
+        const batch = guestIds.slice(i, i + concurrency);
+        const batchPromises = batch.map((guestId, batchIndex) =>
+            processGuest(guestId, i + batchIndex)
+        );
+
+        const batchResults = await Promise.all(batchPromises);
+
+        for (const result of batchResults) {
+            if (result.error) {
+                queue.errors.push({ guestId: result.guestId, error: result.error });
+            }
+            queue.completed++;
+        }
+
+        queue.nextIndex = Math.min(i + concurrency, guestIds.length);
+        saveQueueToDb(queueId, queue);
+
+        console.log(`📊 Progress: ${queue.completed}/${queue.total} (${Math.round(queue.completed / queue.total * 100)}%)`);
+
+        // Small delay between batches to be nice to APIs
+        if (i + concurrency < guestIds.length) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    }
+
+    if (queue.status !== 'stopped') {
+        queue.status = 'completed';
+        queue.currentProcessing = [];
+        saveQueueToDb(queueId, queue);
+        console.log(`🎉 Parallel enrichment completed: ${queue.completed}/${queue.total}`);
+    }
+}
+
 
 // GET /api/research/queue/active - Find any active queue
 router.get('/queue/active', (req, res) => {
@@ -964,6 +1166,7 @@ router.put('/:guestId/select-linkedin', async (req, res) => {
                 vip_score = ?,
                 influence_level = ?,
                 needs_linkedin_review = 0,
+                no_results_found = 0,
                 updated_at = CURRENT_TIMESTAMP
             WHERE guest_id = ?
         `).run(
@@ -994,6 +1197,7 @@ router.put('/:guestId/select-linkedin', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
 
 module.exports = {
     router,

@@ -23,6 +23,8 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
     const [isCustomAnalyzing, setIsCustomAnalyzing] = useState(false);
     const [showAiAssistant, setShowAiAssistant] = useState(false);
     const [message, setMessage] = useState(null);
+    const [showPhotoOverlay, setShowPhotoOverlay] = useState(false);
+    const [showSources, setShowSources] = useState(false);
 
     // DEBUG: Log research data to console
     useEffect(() => {
@@ -123,20 +125,32 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
     const handleDelete = async () => {
         setDeleting(true);
         try {
-            const response = await fetch(`/api/guests/${guest.id}`, {
+            const response = await apiFetch(`/api/guests/${guest.id}`, {
                 method: 'DELETE'
             });
 
-            if (response.ok) {
-                if (onUpdate) onUpdate();
-                onClose();
-            } else {
-                console.error('Verwijderen mislukt');
-            }
+            if (onUpdate) onUpdate();
+            onClose();
         } catch (error) {
             console.error('Verwijderen mislukt:', error);
         } finally {
             setDeleting(false);
+        }
+    };
+
+    const handleClearResearch = async () => {
+        if (!window.confirm('Weet je zeker dat je alle onderzoeksresultaten voor deze gast wilt wissen? De gast zelf blijft bestaan.')) {
+            return;
+        }
+
+        try {
+            await apiFetch(`/api/research/${guest.id}`, {
+                method: 'DELETE'
+            });
+            if (onUpdate) onUpdate();
+        } catch (error) {
+            console.error('Wissen research mislukt:', error);
+            alert('Fout bij het wissen van research: ' + error.message);
         }
     };
 
@@ -147,7 +161,17 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
         return 'Laag';
     };
 
+    const handleManualGoogleSearch = () => {
+        const query = encodeURIComponent(`"${guest.full_name}" ${guest.company || ''} ${guest.country || ''} linkedin`);
+        window.open(`https://www.google.com/search?q=${query}`, '_blank');
+    };
+
     const research = guest.research;
+    const rawResults = research?.raw_search_results ?
+        (typeof research.raw_search_results === 'string' ? JSON.parse(research.raw_search_results) : research.raw_search_results)
+        : [];
+    const fallbackData = rawResults.find(r => r.type === 'google_fallback' && r.data)?.data;
+    const isFallback = !!fallbackData;
 
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -160,7 +184,8 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                 <img
                                     src={research.profile_photo_url}
                                     alt={guest.full_name}
-                                    className="w-16 h-16 rounded-full object-cover border-2 border-[var(--color-accent-gold)] shadow-md"
+                                    className="w-16 h-16 rounded-full object-cover border-2 border-[var(--color-accent-gold)] shadow-md cursor-zoom-in hover:scale-110 transition-transform"
+                                    onClick={() => setShowPhotoOverlay(true)}
                                     onError={(e) => {
                                         e.target.onerror = null;
                                         e.target.style.display = 'none';
@@ -391,19 +416,64 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                             Onderzoeksresultaten
                         </h4>
 
-                        {/* Financial Info */}
-                        {(research.net_worth || research.followers_estimate) && (
-                            <div className="grid grid-cols-2 gap-4 mb-4 p-4 bg-[var(--color-bg-secondary)] rounded-lg">
-                                {research.net_worth && (
-                                    <div>
-                                        <span className="text-xs text-[var(--color-text-secondary)] uppercase">Net Worth</span>
-                                        <div className="text-lg font-semibold text-[var(--color-accent-gold)]">{research.net_worth}</div>
-                                    </div>
-                                )}
-                                {research.followers_estimate && (
-                                    <div>
-                                        <span className="text-xs text-[var(--color-text-secondary)] uppercase">Volgers</span>
-                                        <div className="text-lg font-semibold">{research.followers_estimate}</div>
+                        {research.no_results_found === 1 && (
+                            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-4 text-red-700 shadow-sm animate-in fade-in slide-in-from-top-2 duration-300">
+                                <div className="text-2xl mt-0.5">⚠️</div>
+                                <div className="space-y-1">
+                                    <p className="font-bold text-base leading-tight">Geen openbare informatie gevonden</p>
+                                    <p className="text-sm opacity-90 leading-relaxed">
+                                        Onze AI-onderzoeker kon geen betrouwbare publieke profielen, nieuwsberichten of bedrijfsgegevens vinden voor deze gast.
+                                        Dit kan betekenen dat de gast een zeer beperkte online aanwezigheid heeft of dat de gegevens afgeschermd zijn.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Financial Info & Follower Breakdown */}
+                        {(research.net_worth || research.followers_estimate || research.instagram_followers || research.twitter_followers) && (
+                            <div className="mb-4 p-4 bg-[var(--color-bg-secondary)] rounded-lg">
+                                <div className="grid grid-cols-2 gap-4">
+                                    {research.net_worth && (
+                                        <div>
+                                            <span className="text-xs text-[var(--color-text-secondary)] uppercase">Net Worth</span>
+                                            <div className="text-lg font-semibold text-[var(--color-accent-gold)]">{research.net_worth}</div>
+                                        </div>
+                                    )}
+                                    {(research.followers_estimate || research.instagram_followers || research.twitter_followers) && (
+                                        <div>
+                                            <span className="text-xs text-[var(--color-text-secondary)] uppercase">Volgers (totaal)</span>
+                                            <div className="text-lg font-semibold">{research.followers_estimate || 'Onbekend'}</div>
+                                        </div>
+                                    )}
+                                </div>
+                                {/* Follower Breakdown by Platform */}
+                                {(research.instagram_followers || research.twitter_followers) && (
+                                    <div className="mt-3 pt-3 border-t border-[var(--color-border)]">
+                                        <span className="text-[10px] text-[var(--color-text-secondary)] uppercase font-semibold block mb-2">Uitsplitsing per platform</span>
+                                        <div className="flex flex-wrap gap-3">
+                                            {research.instagram_followers && (
+                                                <div className="flex items-center gap-1.5 text-sm">
+                                                    <span className="w-4 h-4 rounded bg-gradient-to-tr from-[#833AB4] via-[#FD1D1D] to-[#F77737] flex items-center justify-center">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="white">
+                                                            <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073z" />
+                                                        </svg>
+                                                    </span>
+                                                    <span className="font-medium">{research.instagram_followers.toLocaleString()}</span>
+                                                    <span className="text-[var(--color-text-secondary)] text-xs">Instagram</span>
+                                                </div>
+                                            )}
+                                            {research.twitter_followers && (
+                                                <div className="flex items-center gap-1.5 text-sm">
+                                                    <span className="w-4 h-4 rounded bg-black flex items-center justify-center">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="white">
+                                                            <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                                                        </svg>
+                                                    </span>
+                                                    <span className="font-medium">{research.twitter_followers.toLocaleString()}</span>
+                                                    <span className="text-[var(--color-text-secondary)] text-xs">X / Twitter</span>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -479,7 +549,72 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                     Website
                                 </a>
                             )}
+                            {isFallback && (
+                                <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-700 border border-blue-100 rounded-lg text-xs font-medium shadow-sm animate-pulse">
+                                    ✨ Gevonden via AI Fallback
+                                </div>
+                            )}
+
+                            {/* Sources Toggle Button */}
+                            <button
+                                onClick={() => setShowSources(!showSources)}
+                                className="flex items-center gap-2 px-3 py-2 bg-gray-100 text-gray-700 border border-gray-200 rounded-lg text-sm hover:bg-gray-200 transition-colors"
+                            >
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                                </svg>
+                                Bronnen {rawResults.length > 0 && `(${rawResults.length})`}
+                            </button>
                         </div>
+
+                        {/* Sources List */}
+                        {showSources && rawResults.length > 0 && (
+                            <div className="mb-6 p-4 bg-gray-50 border border-gray-200 rounded-lg animate-in fade-in slide-in-from-top-2 duration-200">
+                                <h5 className="font-semibold text-xs text-uppercase text-gray-500 mb-3 tracking-wide">Geraadpleegde Bronnen</h5>
+                                <ul className="space-y-2 text-xs font-mono">
+                                    {rawResults.map((result, idx) => {
+                                        // Collect all URLs from this result entry
+                                        let links = [];
+                                        if (result.url) links.push({ url: result.url, label: result.title || 'Direct Link' });
+                                        if (result.link) links.push({ url: result.link, label: result.title || 'Direct Link' });
+                                        if (result.data?.url) links.push({ url: result.data.url, label: result.data.title || 'Data Link' });
+
+                                        // If search results array
+                                        if (Array.isArray(result.results)) {
+                                            result.results.forEach(r => {
+                                                if (r.link) links.push({ url: r.link, label: r.title || 'Search Result' });
+                                            });
+                                        }
+
+                                        // Deduplicate
+                                        links = [...new Map(links.map(item => [item.url, item])).values()];
+
+                                        if (links.length === 0) return null;
+
+                                        return (
+                                            <li key={idx} className="border-b border-gray-100 last:border-0 pb-2 mb-2 last:pb-0 last:mb-0">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span className="px-1.5 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px] font-bold uppercase">{result.type || 'Source'}</span>
+                                                </div>
+                                                {links.map((link, lIdx) => (
+                                                    <a
+                                                        key={lIdx}
+                                                        href={link.url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="block text-blue-600 hover:underline truncate"
+                                                        title={link.url}
+                                                    >
+                                                        {link.url}
+                                                    </a>
+                                                ))}
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            </div>
+                        )}
 
                         {/* LinkedIn Review/Selection Section */}
                         {research.linkedin_candidates && (
@@ -565,6 +700,12 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                                 className="text-[10px] text-gray-500 hover:text-gray-700 italic underline mt-2 block w-full text-center"
                                             >
                                                 Niemand klopt? Probeer onderzoek opnieuw met aangepaste gegevens.
+                                            </button>
+                                            <button
+                                                onClick={handleManualGoogleSearch}
+                                                className="text-[10px] text-blue-600 hover:text-blue-800 font-semibold mt-2 block w-full text-center hover:underline"
+                                            >
+                                                Of zoek handmatig op Google voor meer resultaten
                                             </button>
                                         </div>
                                     </div>
@@ -665,17 +806,64 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                                         <li>{fullReport.vip_indicators?.status_markers}</li>
                                                     </ul>
                                                 </div>
-                                                <div>
-                                                    <h5 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-accent-gold)] mb-2">
-                                                        Service Aanbevelingen
-                                                    </h5>
-                                                    <div className="text-sm space-y-2">
-                                                        <p><span className="badge bg-gold-lite text-[var(--color-accent-gold)] px-2 py-0.5 rounded text-[10px] font-bold mr-2">
+                                                <div className="flex-1">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <h5 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-accent-gold)]">
+                                                            Service Aanbevelingen
+                                                        </h5>
+                                                        <span className="badge bg-gold-lite text-[var(--color-accent-gold)] px-2 py-0.5 rounded text-[10px] font-bold">
                                                             {fullReport.service_recommendations?.priority_level}
-                                                        </span></p>
-                                                        <p><strong>Focus:</strong> {fullReport.service_recommendations?.special_attention}</p>
-                                                        <p><strong>Stijl:</strong> {fullReport.service_recommendations?.communication_style}</p>
-                                                        <p><strong>Cadeau tip:</strong> {fullReport.service_recommendations?.gift_suggestions}</p>
+                                                        </span>
+                                                    </div>
+
+                                                    {fullReport.service_recommendations?.quick_win && (
+                                                        <div className="mb-4 p-3 bg-white border border-[var(--color-accent-gold)] border-opacity-30 rounded-lg shadow-sm">
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <span className="text-sm">⚡</span>
+                                                                <span className="text-[10px] font-bold uppercase text-[var(--color-accent-gold)]">Quick Win</span>
+                                                            </div>
+                                                            <p className="text-sm font-medium text-[var(--color-text-primary)]">
+                                                                {fullReport.service_recommendations.quick_win}
+                                                            </p>
+                                                        </div>
+                                                    )}
+
+                                                    <div className="space-y-2">
+                                                        {fullReport.service_recommendations?.categories ? (
+                                                            fullReport.service_recommendations.categories.map((cat, idx) => (
+                                                                <details key={idx} className="group border border-[var(--color-border)] rounded-lg overflow-hidden bg-white transition-all">
+                                                                    <summary className="flex items-center justify-between p-3 cursor-pointer hover:bg-[var(--color-bg-secondary)] transition-colors list-none">
+                                                                        <span className="text-sm font-semibold text-[var(--color-text-primary)]">
+                                                                            {cat.title}
+                                                                        </span>
+                                                                        <span className="transform group-open:rotate-180 transition-transform text-xs opacity-50">
+                                                                            ▼
+                                                                        </span>
+                                                                    </summary>
+                                                                    <div className="p-3 pt-0 animate-in slide-in-from-top-1 duration-200">
+                                                                        <ul className="text-xs space-y-2 list-disc list-inside text-[var(--color-text-secondary)]">
+                                                                            {cat.items?.map((item, i) => (
+                                                                                <li key={i} className="leading-relaxed">
+                                                                                    {item}
+                                                                                </li>
+                                                                            ))}
+                                                                        </ul>
+                                                                    </div>
+                                                                </details>
+                                                            ))
+                                                        ) : (
+                                                            <div className="text-sm space-y-2 text-[var(--color-text-secondary)]">
+                                                                {fullReport.service_recommendations?.special_attention && (
+                                                                    <p><strong>Focus:</strong> {fullReport.service_recommendations.special_attention}</p>
+                                                                )}
+                                                                {fullReport.service_recommendations?.communication_style && (
+                                                                    <p><strong>Stijl:</strong> {fullReport.service_recommendations.communication_style}</p>
+                                                                )}
+                                                                {fullReport.service_recommendations?.gift_suggestions && (
+                                                                    <p><strong>Cadeau tip:</strong> {fullReport.service_recommendations.gift_suggestions}</p>
+                                                                )}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 </div>
                                             </div>
@@ -830,13 +1018,24 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                         </button>
                                     </div>
                                 ) : (
-                                    <button
-                                        onClick={() => setShowDeleteConfirm(true)}
-                                        className="btn btn-secondary"
-                                        style={{ color: '#dc2626' }}
-                                    >
-                                        🗑️ Verwijderen
-                                    </button>
+                                    <div className="flex gap-2">
+                                        {research && (
+                                            <button
+                                                onClick={handleClearResearch}
+                                                className="btn btn-secondary text-amber-600 border-amber-200 hover:bg-amber-50"
+                                                title="Onderzoeksresultaten wissen"
+                                            >
+                                                🧹 Wissen
+                                            </button>
+                                        )}
+                                        <button
+                                            onClick={() => setShowDeleteConfirm(true)}
+                                            className="btn btn-secondary"
+                                            style={{ color: '#dc2626' }}
+                                        >
+                                            🗑️ Verwijderen
+                                        </button>
+                                    </div>
                                 )}
                             </>
                         )}
@@ -870,6 +1069,35 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                     </div>
                 </div>
             </div>
+
+            {/* Photo Overlay */}
+            {showPhotoOverlay && research?.profile_photo_url && (
+                <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center bg-black bg-opacity-90 animate-in fade-in duration-200 cursor-zoom-out"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setShowPhotoOverlay(false);
+                    }}
+                >
+                    <img
+                        src={research.profile_photo_url}
+                        alt={guest.full_name}
+                        className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200"
+                    />
+                    <button
+                        className="absolute top-4 right-4 text-white hover:text-gray-300 transition-colors p-4"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setShowPhotoOverlay(false);
+                        }}
+                    >
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

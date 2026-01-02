@@ -58,6 +58,7 @@ db.exec(`
     vip_score INTEGER DEFAULT 5 CHECK(vip_score BETWEEN 1 AND 10),
     influence_level TEXT CHECK(influence_level IN ('Laag', 'Gemiddeld', 'Hoog', 'VIP')),
     raw_search_results TEXT,
+    no_results_found INTEGER DEFAULT 0,
     researched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -129,6 +130,21 @@ db.exec(`
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- SerpAPI cache table (to reduce API costs)
+  CREATE TABLE IF NOT EXISTS serpapi_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_hash TEXT UNIQUE NOT NULL,
+    query_text TEXT NOT NULL,
+    search_type TEXT NOT NULL,
+    result_data TEXT NOT NULL,
+    hit_count INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME DEFAULT (datetime('now', '+30 days'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_serpapi_cache_hash ON serpapi_cache(query_hash);
+  CREATE INDEX IF NOT EXISTS idx_serpapi_cache_expires ON serpapi_cache(expires_at);
 `);
 
 // Migrations
@@ -335,6 +351,14 @@ try {
     console.log('🔄 Adding youtube_url column to research_results...');
     db.prepare("ALTER TABLE research_results ADD COLUMN youtube_url TEXT").run();
     console.log('✅ youtube_url column added successfully');
+  }
+
+  // Add no_results_found migration
+  const hasNoResultsFound = researchInfo.some(col => col.name === 'no_results_found');
+  if (!hasNoResultsFound) {
+    console.log('🔄 Adding no_results_found column to research_results...');
+    db.prepare("ALTER TABLE research_results ADD COLUMN no_results_found INTEGER DEFAULT 0").run();
+    console.log('✅ no_results_found column added successfully');
   }
 
 } catch (error) {
