@@ -55,7 +55,10 @@ router.get('/', (req, res) => {
             query += ` AND r.id IS NULL`;
         }
 
-        if (vipOnly === 'true') {
+        if (req.query.minVipScore) {
+            query += ` AND r.vip_score >= ?`;
+            params.push(parseInt(req.query.minVipScore));
+        } else if (vipOnly === 'true') {
             query += ` AND r.vip_score >= 7`;
         }
 
@@ -91,7 +94,10 @@ router.get('/', (req, res) => {
             countQuery += ` AND r.id IS NULL`;
         }
 
-        if (vipOnly === 'true') {
+        if (req.query.minVipScore) {
+            countQuery += ` AND r.vip_score >= ?`;
+            countParams.push(parseInt(req.query.minVipScore));
+        } else if (vipOnly === 'true') {
             countQuery += ` AND r.vip_score >= 7`;
         }
 

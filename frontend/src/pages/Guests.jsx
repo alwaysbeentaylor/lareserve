@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import GuestModal from '../components/guests/GuestModal';
 import AddGuestForm from '../components/guests/AddGuestForm';
 import { apiFetch } from '../utils/api';
@@ -24,13 +24,27 @@ function Guests({ onUpdate }) {
     const [currentPage, setCurrentPage] = useState(1);
     const [itemsPerPage, setItemsPerPage] = useState(10);
 
+    // Ref to track previous filter/sort values for smart page reset
+    const prevFiltersRef = useRef({ search, filter, sortOrder, itemsPerPage });
+
     useEffect(() => {
         fetchGuests();
     }, [search, filter, sortOrder, currentPage, itemsPerPage]);
 
-    // Reset naar pagina 1 wanneer filters of page size veranderen
+    // Reset naar pagina 1 ALLEEN wanneer filters, zoekterm, of page size veranderen
+    // Dit voorkomt reset tijdens automatische data refreshes
     useEffect(() => {
-        setCurrentPage(1);
+        const prevFilters = prevFiltersRef.current;
+        const filtersChanged =
+            prevFilters.search !== search ||
+            prevFilters.filter !== filter ||
+            prevFilters.sortOrder !== sortOrder ||
+            prevFilters.itemsPerPage !== itemsPerPage;
+
+        if (filtersChanged) {
+            setCurrentPage(1);
+            prevFiltersRef.current = { search, filter, sortOrder, itemsPerPage };
+        }
     }, [search, filter, sortOrder, itemsPerPage]);
 
     // Check voor actieve enrichment queue
@@ -40,6 +54,18 @@ function Guests({ onUpdate }) {
                 const data = await apiFetch('/api/research/queue/active');
                 if (data.active) {
                     setEnrichmentProgress(data);
+
+                    // Auto-dismiss after completion (5 seconds after completed)
+                    if (data.status === 'completed') {
+                        setTimeout(() => {
+                            setEnrichmentProgress(null);
+                        }, 5000);
+                    }
+                } else {
+                    // No active queue - clear progress if it was showing completed
+                    if (enrichmentProgress?.status === 'completed') {
+                        setEnrichmentProgress(null);
+                    }
                 }
             } catch (err) {
                 console.error('Fout bij checken actieve queue:', err);
@@ -47,7 +73,8 @@ function Guests({ onUpdate }) {
         };
 
         checkActiveQueue();
-        const interval = setInterval(checkActiveQueue, 3000);
+        // Poll every 2 seconds for faster updates
+        const interval = setInterval(checkActiveQueue, 2000);
         return () => clearInterval(interval);
     }, []);
 
@@ -153,7 +180,7 @@ function Guests({ onUpdate }) {
         try {
             const data = await apiFetch('/api/research/queue/start', {
                 method: 'POST',
-                body: JSON.stringify({ guestIds: selectedIds })
+                body: JSON.stringify({ guestIds: selectedIds, concurrency: 1 })
             });
             console.log('Bulk research gestart:', data.queueId);
             setSelectedIds([]);
@@ -165,7 +192,8 @@ function Guests({ onUpdate }) {
     const handleEnrichAll = async () => {
         try {
             const data = await apiFetch('/api/research/queue/start-pending', {
-                method: 'POST'
+                method: 'POST',
+                body: JSON.stringify({ concurrency: 1 })
             });
             console.log('Enrich all started:', data.queueId);
         } catch (error) {
@@ -267,6 +295,7 @@ function Guests({ onUpdate }) {
     const handleGuestUpdated = () => {
         fetchGuests();
         setSelectedGuest(null);
+        setShowAddForm(false);
         if (onUpdate) onUpdate();
     };
 
@@ -537,177 +566,186 @@ function Guests({ onUpdate }) {
                                 </tr>
                             </thead>
                             <tbody>
-                                {guests.map((guest) => (
-                                    <tr
-                                        key={guest.id}
-                                        className={`clickable ${selectedIds.includes(guest.id) ? 'bg-[var(--color-bg-secondary)]' : ''}`}
-                                        onClick={() => handleGuestClick(guest)}
-                                    >
-                                        <td onClick={(e) => e.stopPropagation()}>
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedIds.includes(guest.id)}
-                                                onChange={() => handleToggleSelection(guest.id)}
-                                                className="rounded border-[var(--color-border)] text-[var(--color-accent-gold)] focus:ring-[var(--color-accent-gold)]"
-                                            />
-                                        </td>
-                                        <td>
-                                            <div className="flex items-center gap-3">
-                                                <div className="flex-shrink-0">
-                                                    {guest.profile_photo_url ? (
-                                                        <img
-                                                            src={guest.profile_photo_url}
-                                                            alt={guest.full_name}
-                                                            className="w-10 h-10 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
-                                                            onError={(e) => {
-                                                                e.target.onerror = null;
-                                                                e.target.style.display = 'none';
-                                                                const placeholder = document.createElement('div');
-                                                                placeholder.className = "w-10 h-10 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] flex items-center justify-center text-[var(--color-text-secondary)] font-semibold shadow-sm";
-                                                                placeholder.innerText = guest.full_name.charAt(0).toUpperCase();
-                                                                e.target.parentNode.appendChild(placeholder);
-                                                            }}
-                                                        />
-                                                    ) : (
-                                                        <div className="w-10 h-10 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] flex items-center justify-center text-[var(--color-text-secondary)] font-semibold shadow-sm">
-                                                            {guest.full_name.charAt(0).toUpperCase()}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                <div>
-                                                    <div className="font-medium flex items-center gap-2">
-                                                        {guest.full_name}
-                                                        {enrichmentProgress?.current === guest.id && (
-                                                            <span className="inline-flex items-center text-[10px] text-purple-600 font-normal bg-purple-50 px-2 py-0.5 rounded-full animate-pulse">
-                                                                <span className="animate-spin mr-1">🔄</span>
-                                                                AI analyse...
-                                                            </span>
+                                {guests.map((guest) => {
+                                    const isBeingResearched = enrichmentProgress?.current === guest.id && enrichmentProgress?.status === 'running';
+                                    return (
+                                        <tr
+                                            key={guest.id}
+                                            className={`clickable transition-all duration-300 ${isBeingResearched
+                                                ? 'bg-purple-50 ring-2 ring-purple-300 ring-inset animate-pulse'
+                                                : selectedIds.includes(guest.id)
+                                                    ? 'bg-[var(--color-bg-secondary)]'
+                                                    : ''
+                                                }`}
+                                            style={isBeingResearched ? { boxShadow: '0 0 15px rgba(147, 51, 234, 0.2)' } : {}}
+                                            onClick={() => handleGuestClick(guest)}
+                                        >
+                                            <td onClick={(e) => e.stopPropagation()}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedIds.includes(guest.id)}
+                                                    onChange={() => handleToggleSelection(guest.id)}
+                                                    className="rounded border-[var(--color-border)] text-[var(--color-accent-gold)] focus:ring-[var(--color-accent-gold)]"
+                                                />
+                                            </td>
+                                            <td>
+                                                <div className="flex items-center gap-3">
+                                                    <div className="flex-shrink-0">
+                                                        {guest.profile_photo_url ? (
+                                                            <img
+                                                                src={guest.profile_photo_url}
+                                                                alt={guest.full_name}
+                                                                className="w-10 h-10 rounded-full object-cover border border-[var(--color-border)] shadow-sm"
+                                                                onError={(e) => {
+                                                                    e.target.onerror = null;
+                                                                    e.target.style.display = 'none';
+                                                                    const placeholder = document.createElement('div');
+                                                                    placeholder.className = "w-10 h-10 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] flex items-center justify-center text-[var(--color-text-secondary)] font-semibold shadow-sm";
+                                                                    placeholder.innerText = guest.full_name.charAt(0).toUpperCase();
+                                                                    e.target.parentNode.appendChild(placeholder);
+                                                                }}
+                                                            />
+                                                        ) : (
+                                                            <div className="w-10 h-10 rounded-full bg-[var(--color-bg-secondary)] border border-[var(--color-border)] flex items-center justify-center text-[var(--color-text-secondary)] font-semibold shadow-sm">
+                                                                {guest.full_name.charAt(0).toUpperCase()}
+                                                            </div>
                                                         )}
                                                     </div>
-                                                    {guest.email && (
-                                                        <div className="text-xs text-[var(--color-text-secondary)]">
-                                                            {guest.email}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                                                    {guest.linkedin_url && (
-                                                        <div className="relative group">
-                                                            <a href={guest.linkedin_url} target="_blank" rel="noopener noreferrer"
-                                                                className={`social-icon ${guest.needs_linkedin_review ? 'border-yellow-500 text-yellow-500' : ''}`} title="LinkedIn">
-                                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                                                    <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
-                                                                </svg>
-                                                            </a>
-                                                            {guest.needs_linkedin_review === 1 && (
-                                                                <span className="absolute -top-1 -right-1 flex h-3 w-3">
-                                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
-                                                                    <span className="relative inline-flex rounded-full h-3 w-3 bg-yellow-500"></span>
+                                                    <div>
+                                                        <div className="font-medium flex items-center gap-2">
+                                                            {guest.full_name}
+                                                            {enrichmentProgress?.current === guest.id && (
+                                                                <span className="inline-flex items-center text-[10px] text-purple-600 font-normal bg-purple-50 px-2 py-0.5 rounded-full animate-pulse">
+                                                                    <span className="animate-spin mr-1">🔄</span>
+                                                                    AI analyse...
                                                                 </span>
                                                             )}
                                                         </div>
-                                                    )}
-                                                    {!guest.linkedin_url && guest.needs_linkedin_review === 1 && (
-                                                        <span className="text-yellow-500" title="Review nodig">⚠️</span>
-                                                    )}
-                                                    {guest.instagram_url && (
-                                                        <a href={guest.instagram_url} target="_blank" rel="noopener noreferrer"
-                                                            className="social-icon" title="Instagram">
-                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                                                <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" />
-                                                            </svg>
-                                                        </a>
-                                                    )}
-                                                    {guest.twitter_url && (
-                                                        <a href={guest.twitter_url} target="_blank" rel="noopener noreferrer"
-                                                            className="social-icon" title="Twitter/X">
-                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                                                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-                                                            </svg>
-                                                        </a>
-                                                    )}
-                                                    {guest.facebook_url && (
-                                                        <a href={guest.facebook_url} target="_blank" rel="noopener noreferrer"
-                                                            className="social-icon" title="Facebook">
-                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                                                <path d="M9 8h-3v4h3v12h5v-12h3.642l.358-4h-4v-1.667c0-.955.192-1.333 1.115-1.333h2.885v-5h-3.808c-3.596 0-5.192 1.583-5.192 4.615v3.385z" />
-                                                            </svg>
-                                                        </a>
-                                                    )}
-                                                    {guest.website_url && (
-                                                        <a href={guest.website_url.startsWith('http') ? guest.website_url : `https://${guest.website_url}`}
-                                                            target="_blank" rel="noopener noreferrer"
-                                                            className="social-icon text-[var(--color-accent-gold)]" title="Website">
-                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                                <circle cx="12" cy="12" r="10"></circle>
-                                                                <line x1="2" y1="12" x2="22" y2="12"></line>
-                                                                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
-                                                            </svg>
-                                                        </a>
+                                                        {guest.email && (
+                                                            <div className="text-xs text-[var(--color-text-secondary)]">
+                                                                {guest.email}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                                                        {guest.linkedin_url && (
+                                                            <div className="relative group">
+                                                                <a href={guest.linkedin_url} target="_blank" rel="noopener noreferrer"
+                                                                    className={`social-icon ${guest.needs_linkedin_review ? 'border-yellow-500 text-yellow-500' : ''}`} title="LinkedIn">
+                                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                                        <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
+                                                                    </svg>
+                                                                </a>
+                                                                {guest.needs_linkedin_review === 1 && (
+                                                                    <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                                                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
+                                                                        <span className="relative inline-flex rounded-full h-3 w-3 bg-yellow-500"></span>
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                        {!guest.linkedin_url && guest.needs_linkedin_review === 1 && (
+                                                            <span className="text-yellow-500" title="Review nodig">⚠️</span>
+                                                        )}
+                                                        {guest.instagram_url && (
+                                                            <a href={guest.instagram_url} target="_blank" rel="noopener noreferrer"
+                                                                className="social-icon" title="Instagram">
+                                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                                    <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" />
+                                                                </svg>
+                                                            </a>
+                                                        )}
+                                                        {guest.twitter_url && (
+                                                            <a href={guest.twitter_url} target="_blank" rel="noopener noreferrer"
+                                                                className="social-icon" title="Twitter/X">
+                                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                                    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                                                                </svg>
+                                                            </a>
+                                                        )}
+                                                        {guest.facebook_url && (
+                                                            <a href={guest.facebook_url} target="_blank" rel="noopener noreferrer"
+                                                                className="social-icon" title="Facebook">
+                                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                                    <path d="M9 8h-3v4h3v12h5v-12h3.642l.358-4h-4v-1.667c0-.955.192-1.333 1.115-1.333h2.885v-5h-3.808c-3.596 0-5.192 1.583-5.192 4.615v3.385z" />
+                                                                </svg>
+                                                            </a>
+                                                        )}
+                                                        {guest.website_url && (
+                                                            <a href={guest.website_url.startsWith('http') ? guest.website_url : `https://${guest.website_url}`}
+                                                                target="_blank" rel="noopener noreferrer"
+                                                                className="social-icon text-[var(--color-accent-gold)]" title="Website">
+                                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                    <circle cx="12" cy="12" r="10"></circle>
+                                                                    <line x1="2" y1="12" x2="22" y2="12"></line>
+                                                                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                                                                </svg>
+                                                            </a>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td className="text-[var(--color-text-secondary)]">
+                                                {guest.job_title || '-'}
+                                            </td>
+                                            <td className="text-[var(--color-text-secondary)]">
+                                                {guest.research_company || guest.company || '-'}
+                                            </td>
+                                            <td className="text-[var(--color-text-secondary)]">
+                                                {guest.country || '-'}
+                                            </td>
+                                            <td>
+                                                {guest.net_worth ? (
+                                                    <span className="text-sm font-medium text-[var(--color-accent-gold)]">
+                                                        {guest.net_worth}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-[var(--color-text-secondary)]">-</span>
+                                                )}
+                                            </td>
+                                            <td>
+                                                {guest.vip_score ? (
+                                                    <span className={getVIPBadgeClass(guest.vip_score)}>
+                                                        {guest.vip_score}/10
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-[var(--color-text-secondary)]">
+                                                        -
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td onClick={(e) => e.stopPropagation()}>
+                                                <div className="flex gap-2">
+                                                    {researchingIds.includes(guest.id) ? (
+                                                        <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-lg border border-gray-100">
+                                                            <span className="animate-spin text-xs">🔄</span>
+                                                            <span className="text-[10px] font-medium text-gray-500 uppercase tracking-tight">Onderzoeken...</span>
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            {!guest.researched_at && (
+                                                                <button
+                                                                    onClick={() => handleResearch(guest.id)}
+                                                                    className="btn btn-ghost text-xs px-3 py-1 hover:bg-[var(--color-accent-gold-lite)] transition-all"
+                                                                >
+                                                                    🔍 Onderzoek
+                                                                </button>
+                                                            )}
+                                                            {guest.vip_score && (
+                                                                <button
+                                                                    onClick={() => handleDownloadPDF(guest.id, guest.full_name)}
+                                                                    className="btn btn-ghost text-xs px-3 py-1 hover:bg-gray-100 transition-all text-gray-700"
+                                                                >
+                                                                    📄 PDF
+                                                                </button>
+                                                            )}
+                                                        </>
                                                     )}
                                                 </div>
-                                            </div>
-                                        </td>
-                                        <td className="text-[var(--color-text-secondary)]">
-                                            {guest.job_title || '-'}
-                                        </td>
-                                        <td className="text-[var(--color-text-secondary)]">
-                                            {guest.research_company || guest.company || '-'}
-                                        </td>
-                                        <td className="text-[var(--color-text-secondary)]">
-                                            {guest.country || '-'}
-                                        </td>
-                                        <td>
-                                            {guest.net_worth ? (
-                                                <span className="text-sm font-medium text-[var(--color-accent-gold)]">
-                                                    {guest.net_worth}
-                                                </span>
-                                            ) : (
-                                                <span className="text-xs text-[var(--color-text-secondary)]">-</span>
-                                            )}
-                                        </td>
-                                        <td>
-                                            {guest.vip_score ? (
-                                                <span className={getVIPBadgeClass(guest.vip_score)}>
-                                                    {guest.vip_score}/10
-                                                </span>
-                                            ) : (
-                                                <span className="text-xs text-[var(--color-text-secondary)]">
-                                                    -
-                                                </span>
-                                            )}
-                                        </td>
-                                        <td onClick={(e) => e.stopPropagation()}>
-                                            <div className="flex gap-2">
-                                                {researchingIds.includes(guest.id) ? (
-                                                    <div className="flex items-center gap-2 px-3 py-1 bg-gray-50 rounded-lg border border-gray-100">
-                                                        <span className="animate-spin text-xs">🔄</span>
-                                                        <span className="text-[10px] font-medium text-gray-500 uppercase tracking-tight">Onderzoeken...</span>
-                                                    </div>
-                                                ) : (
-                                                    <>
-                                                        {!guest.researched_at && (
-                                                            <button
-                                                                onClick={() => handleResearch(guest.id)}
-                                                                className="btn btn-ghost text-xs px-3 py-1 hover:bg-[var(--color-accent-gold-lite)] transition-all"
-                                                            >
-                                                                🔍 Onderzoek
-                                                            </button>
-                                                        )}
-                                                        {guest.vip_score && (
-                                                            <button
-                                                                onClick={() => handleDownloadPDF(guest.id, guest.full_name)}
-                                                                className="btn btn-ghost text-xs px-3 py-1 hover:bg-gray-100 transition-all text-gray-700"
-                                                            >
-                                                                📄 PDF
-                                                            </button>
-                                                        )}
-                                                    </>
-                                                )}
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ))}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>

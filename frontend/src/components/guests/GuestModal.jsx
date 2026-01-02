@@ -173,6 +173,20 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
     const fallbackData = rawResults.find(r => r.type === 'google_fallback' && r.data)?.data;
     const isFallback = !!fallbackData;
 
+    // Count sources that actually have usable URLs
+    const usableSourcesCount = rawResults.filter(result => {
+        const data = result.data;
+        if (!data) return false;
+        if (result.type === 'linkedin_search' && data.candidates?.length > 0) return true;
+        if (result.type === 'celebrity_detection' && data.wikipediaUrl) return true;
+        if (result.type === 'news_search' && data.articles?.length > 0) return true;
+        if (result.type === 'instagram_search' && data.url) return true;
+        if (result.type === 'twitter_search' && data.url) return true;
+        if (result.type === 'google_fallback' && data.url) return true;
+        if (result.type === 'email_domain' && data.websiteUrl) return true;
+        return false;
+    }).length;
+
     return (
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -564,55 +578,99 @@ function GuestModal({ guest, onClose, onUpdate, onResearch, onDownloadPDF }) {
                                     <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
                                     <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
                                 </svg>
-                                Bronnen {rawResults.length > 0 && `(${rawResults.length})`}
+                                Bronnen {usableSourcesCount > 0 && `(${usableSourcesCount})`}
                             </button>
                         </div>
 
                         {/* Sources List */}
-                        {showSources && rawResults.length > 0 && (
+                        {showSources && usableSourcesCount > 0 && (
                             <div className="mb-6 p-4 bg-gray-50 border border-gray-200 rounded-lg animate-in fade-in slide-in-from-top-2 duration-200">
                                 <h5 className="font-semibold text-xs text-uppercase text-gray-500 mb-3 tracking-wide">Geraadpleegde Bronnen</h5>
-                                <ul className="space-y-2 text-xs font-mono">
+                                <div className="flex flex-wrap gap-2">
                                     {rawResults.map((result, idx) => {
-                                        // Collect all URLs from this result entry
-                                        let links = [];
-                                        if (result.url) links.push({ url: result.url, label: result.title || 'Direct Link' });
-                                        if (result.link) links.push({ url: result.link, label: result.title || 'Direct Link' });
-                                        if (result.data?.url) links.push({ url: result.data.url, label: result.data.title || 'Data Link' });
+                                        const data = result.data;
+                                        if (!data) return null;
 
-                                        // If search results array
-                                        if (Array.isArray(result.results)) {
-                                            result.results.forEach(r => {
-                                                if (r.link) links.push({ url: r.link, label: r.title || 'Search Result' });
-                                            });
+                                        // LinkedIn
+                                        if (result.type === 'linkedin_search' && data.candidates?.length > 0) {
+                                            return data.candidates.map((c, cIdx) => c.url && (
+                                                <a key={`li-${idx}-${cIdx}`} href={c.url} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#0077B5] text-white rounded-full text-xs font-medium hover:bg-[#005885] transition-colors">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" /></svg>
+                                                    LinkedIn
+                                                </a>
+                                            ));
                                         }
 
-                                        // Deduplicate
-                                        links = [...new Map(links.map(item => [item.url, item])).values()];
+                                        // Wikipedia
+                                        if (result.type === 'celebrity_detection' && data.wikipediaUrl) {
+                                            return (
+                                                <a key={`wiki-${idx}`} href={data.wikipediaUrl} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 text-white rounded-full text-xs font-medium hover:bg-gray-800 transition-colors">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12.09 13.119c-.936 1.932-2.217 4.548-2.853 5.728-.616 1.074-1.127.931-1.532.029-1.406-3.321-4.293-9.144-5.651-12.409-.251-.601-.441-.987-.619-1.139-.181-.15-.554-.24-1.122-.271C.103 5.033 0 4.982 0 4.898v-.455l.052-.045c.924-.005 5.401 0 5.401 0l.051.045v.434c0 .119-.075.176-.225.176l-.564.031c-.485.029-.727.164-.727.436 0 .135.053.33.166.601 1.082 2.646 4.818 10.521 4.818 10.521l.136.046 2.411-4.81-.482-1.067-1.658-3.264s-.318-.654-.428-.872c-.728-1.443-.712-1.518-1.447-1.617-.207-.028-.344-.084-.344-.207v-.422l.05-.054h4.517l.054.045v.436c0 .135-.076.18-.229.18l-.377.016c-.612.06-.612.144-.383.639 1.379 2.888 2.383 4.871 2.383 4.871l2.094-4.037c.264-.521.168-.775-.186-.855l-.678-.074c-.15 0-.226-.057-.226-.176v-.496l.05-.045h4.206l.054.054v.436c0 .135-.075.189-.226.189-.556.046-1.275.286-1.664.872l-2.723 5.347.477.976s2.398 4.854 3.062 6.146c.615 1.074 1.063.976 1.47.187.58-1.179 1.809-3.713 2.657-5.611l.496-1.067c.076-.165.15-.283.15-.346 0-.225-.272-.324-.795-.361l-.586-.016c-.151 0-.227-.057-.227-.189v-.422l.051-.054h5.074l.054.054v.436c0 .135-.076.189-.227.189-.557.046-1.231.24-1.582.601l-4.286 8.716-.168.001z" /></svg>
+                                                    Wikipedia
+                                                </a>
+                                            );
+                                        }
 
-                                        if (links.length === 0) return null;
+                                        // News
+                                        if (result.type === 'news_search' && data.articles?.length > 0) {
+                                            return (
+                                                <a key={`news-${idx}`} href={data.articles[0].url} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-full text-xs font-medium hover:bg-red-700 transition-colors">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 11h8m-8 4h4" /></svg>
+                                                    Nieuws ({data.articles.length})
+                                                </a>
+                                            );
+                                        }
 
-                                        return (
-                                            <li key={idx} className="border-b border-gray-100 last:border-0 pb-2 mb-2 last:pb-0 last:mb-0">
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    <span className="px-1.5 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px] font-bold uppercase">{result.type || 'Source'}</span>
-                                                </div>
-                                                {links.map((link, lIdx) => (
-                                                    <a
-                                                        key={lIdx}
-                                                        href={link.url}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="block text-blue-600 hover:underline truncate"
-                                                        title={link.url}
-                                                    >
-                                                        {link.url}
-                                                    </a>
-                                                ))}
-                                            </li>
-                                        );
+                                        // Instagram
+                                        if (result.type === 'instagram_search' && data.url) {
+                                            return (
+                                                <a key={`ig-${idx}`} href={data.url} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500 via-pink-500 to-orange-500 text-white rounded-full text-xs font-medium hover:opacity-90 transition-opacity">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" /></svg>
+                                                    @{data.handle}
+                                                </a>
+                                            );
+                                        }
+
+                                        // Twitter/X
+                                        if (result.type === 'twitter_search' && data.url) {
+                                            return (
+                                                <a key={`tw-${idx}`} href={data.url} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-full text-xs font-medium hover:bg-gray-800 transition-colors">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" /></svg>
+                                                    @{data.handle}
+                                                </a>
+                                            );
+                                        }
+
+                                        // Google/fallback
+                                        if (result.type === 'google_fallback' && data.url) {
+                                            return (
+                                                <a key={`google-${idx}`} href={data.url} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-500 text-white rounded-full text-xs font-medium hover:bg-blue-600 transition-colors">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>
+                                                    Website
+                                                </a>
+                                            );
+                                        }
+
+                                        // Company website
+                                        if (result.type === 'email_domain' && data.websiteUrl) {
+                                            return (
+                                                <a key={`company-${idx}`} href={data.websiteUrl} target="_blank" rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-full text-xs font-medium hover:bg-emerald-700 transition-colors">
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 21h18M3 7v1a3 3 0 003 3h12a3 3 0 003-3V7M3 7l9-4 9 4" /></svg>
+                                                    {data.companyName || 'Bedrijf'}
+                                                </a>
+                                            );
+                                        }
+
+                                        return null;
                                     })}
-                                </ul>
+                                </div>
                             </div>
                         )}
 

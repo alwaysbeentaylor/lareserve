@@ -52,7 +52,7 @@ function Dashboard({ onUpdate }) {
         try {
             const [statsData, guestsData] = await Promise.all([
                 apiFetch('/api/dashboard/stats'),
-                apiFetch('/api/guests?limit=5')
+                apiFetch('/api/guests?limit=10&minVipScore=5')
             ]);
 
             setStats(statsData);
@@ -266,7 +266,7 @@ function Dashboard({ onUpdate }) {
             {/* Recent Guests */}{/* Recent Guests */}
             <div className="card">
                 <div className="p-6 border-b border-[var(--color-border)]">
-                    <h3 className="font-heading text-xl font-semibold">Recente Gasten</h3>
+                    <h3 className="font-heading text-xl font-semibold">Recente VIPs</h3>
                 </div>
 
                 {loading ? (

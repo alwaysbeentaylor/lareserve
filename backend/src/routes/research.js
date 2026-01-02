@@ -790,6 +790,7 @@ async function processEnrichmentQueue(queueId, guestIds, startIndex = 0) {
         queue.status = 'completed';
         queue.current = null;
         queue.currentName = null;
+        queue.completedAt = new Date().toISOString();
         saveQueueToDb(queueId, queue);
         console.log(`🎉 Enrichment queue ${queueId} completed: ${queue.completed}/${queue.total}`);
     }
@@ -925,6 +926,7 @@ async function processEnrichmentQueueParallel(queueId, guestIds, concurrency = 3
     if (queue.status !== 'stopped') {
         queue.status = 'completed';
         queue.currentProcessing = [];
+        queue.completedAt = new Date().toISOString();
         saveQueueToDb(queueId, queue);
         console.log(`🎉 Parallel enrichment completed: ${queue.completed}/${queue.total}`);
     }
@@ -936,11 +938,37 @@ router.get('/queue/active', (req, res) => {
     let activeQueue = null;
     let activeId = null;
 
+    // First look for running queues, then paused, then recently completed
     for (const [id, queue] of enrichmentQueues.entries()) {
         if (queue.status === 'running') {
             activeQueue = queue;
             activeId = id;
             break;
+        }
+    }
+
+    // If no running queue, check for paused
+    if (!activeQueue) {
+        for (const [id, queue] of enrichmentQueues.entries()) {
+            if (queue.status === 'paused') {
+                activeQueue = queue;
+                activeId = id;
+                break;
+            }
+        }
+    }
+
+    // If still nothing, check for recently completed (within last 5 seconds)
+    if (!activeQueue) {
+        for (const [id, queue] of enrichmentQueues.entries()) {
+            if (queue.status === 'completed' && queue.completedAt) {
+                const completedAgo = Date.now() - new Date(queue.completedAt).getTime();
+                if (completedAgo < 5000) {
+                    activeQueue = queue;
+                    activeId = id;
+                    break;
+                }
+            }
         }
     }
 
