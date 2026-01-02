@@ -21,7 +21,7 @@ export default function Footer() {
                             </span>
                         </div>
                         <p className="text-gray-500 max-w-sm mb-6">
-                            Identify high-value guests before arrival. Built for premium hospitality businesses that take VIP service seriously.
+                            Identificeer waardevolle gasten vóór aankomst. Gebouwd voor premium hospitality bedrijven die VIP-service serieus nemen.
                         </p>
                         <div className="flex gap-4">
                             <a href="#" className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center text-gray-400 hover:text-[#D4AF37] hover:border-[#D4AF37]/50 transition-colors">
@@ -41,20 +41,20 @@ export default function Footer() {
                     <div>
                         <h4 className="font-semibold text-white mb-4">Product</h4>
                         <ul className="space-y-3">
-                            <li><a href="#features" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Features</a></li>
-                            <li><a href="#pricing" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Pricing</a></li>
-                            <li><a href="#how-it-works" className="text-gray-500 hover:text-[#D4AF37] transition-colors">How It Works</a></li>
-                            <li><a href="#faq" className="text-gray-500 hover:text-[#D4AF37] transition-colors">FAQ</a></li>
+                            <li><a href="#features" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Functies</a></li>
+                            <li><a href="#pricing" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Tarieven</a></li>
+                            <li><a href="#how-it-works" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Hoe Het Werkt</a></li>
+                            <li><a href="#faq" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Veelgestelde Vragen</a></li>
                         </ul>
                     </div>
 
                     <div>
-                        <h4 className="font-semibold text-white mb-4">Company</h4>
+                        <h4 className="font-semibold text-white mb-4">Bedrijf</h4>
                         <ul className="space-y-3">
-                            <li><a href="#about" className="text-gray-500 hover:text-[#D4AF37] transition-colors">About Us</a></li>
+                            <li><a href="#about" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Over Ons</a></li>
                             <li><a href="#contact" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Contact</a></li>
-                            <li><a href="#" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Privacy Policy</a></li>
-                            <li><a href="#" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Terms of Service</a></li>
+                            <li><a href="#" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Privacybeleid</a></li>
+                            <li><a href="#" className="text-gray-500 hover:text-[#D4AF37] transition-colors">Algemene Voorwaarden</a></li>
                         </ul>
                     </div>
                 </div>
@@ -73,7 +73,7 @@ export default function Footer() {
                                 Online
                             </span>
                             <span className="text-sm text-gray-600">
-                                Made with ♥ in Amsterdam
+                                Gemaakt met ♥ in Amsterdam
                             </span>
                         </div>
                     </div>

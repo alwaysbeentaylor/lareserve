@@ -14,10 +14,10 @@ export default function Navigation() {
     }, []);
 
     const navLinks = [
-        { href: '#how-it-works', label: 'VIP Detection' },
-        { href: '#features', label: 'Intelligence' },
-        { href: '#pricing', label: 'Pricing' },
-        { href: '#faq', label: 'FAQ' },
+        { href: '#how-it-works', label: 'VIP Detectie' },
+        { href: '#features', label: 'Intelligentie' },
+        { href: '#pricing', label: 'Tarieven' },
+        { href: '#faq', label: 'Veelgestelde Vragen' },
     ];
 
     return (
@@ -37,7 +37,7 @@ export default function Navigation() {
                                 Know Your <span className="text-[#D4AF37]">VIP</span>
                             </span>
                             <span className="text-[10px] text-gray-500 leading-none mt-0.5">
-                                Guest Intelligence Platform
+                                Gast Intelligentie Platform
                             </span>
                         </div>
                     </a>
@@ -58,7 +58,7 @@ export default function Navigation() {
                     {/* CTA Button */}
                     <div className="hidden md:flex items-center gap-4">
                         <a href="#contact" className="btn btn-primary">
-                            See VIP Demo
+                            Bekijk Demo
                         </a>
                     </div>
 
@@ -91,7 +91,7 @@ export default function Navigation() {
                             </a>
                         ))}
                         <a href="#contact" className="btn btn-primary w-full mt-4" onClick={() => setMobileMenuOpen(false)}>
-                            See VIP Demo
+                            Bekijk Demo
                         </a>
                     </div>
                 )}
