@@ -253,8 +253,12 @@ function Guests({ onUpdate }) {
             await apiFetch(`/api/research/${guestId}`, {
                 method: 'POST'
             });
-            fetchGuests();
+            // Small delay to ensure database is fully updated
+            await new Promise(resolve => setTimeout(resolve, 500));
+            // Force refresh the guest list
+            await fetchGuests();
             if (onUpdate) onUpdate();
+            console.log('✅ Research completed and list refreshed for guest:', guestId);
         } catch (error) {
             console.error('Research mislukt:', error);
         } finally {
@@ -680,18 +684,8 @@ function Guests({ onUpdate }) {
                                                         )}
                                                     </div>
                                                     <div>
-                                                        <div className="font-medium flex items-center gap-2">
+                                                        <div className="font-medium">
                                                             {guest.full_name}
-                                                            {getGuestStatus(guest) === 'bezig' && (
-                                                                <span className="inline-flex items-center text-[10px] text-purple-600 font-normal bg-purple-50 px-2 py-0.5 rounded-full">
-                                                                    <TypingAnimation text="Bezig..." />
-                                                                </span>
-                                                            )}
-                                                            {getGuestStatus(guest) === 'wachtrij' && (
-                                                                <span className="inline-flex items-center text-[10px] text-amber-600 font-normal bg-amber-50 px-2 py-0.5 rounded-full">
-                                                                    <TypingAnimation text="Wachtrij..." />
-                                                                </span>
-                                                            )}
                                                         </div>
                                                         {guest.email && (
                                                             <div className="text-xs text-[var(--color-text-secondary)]">
