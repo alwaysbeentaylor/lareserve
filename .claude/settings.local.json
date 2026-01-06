@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: Complete Know Your VIP landing page transformation\n\n- Rebranded from Guest Signals to Know Your VIP\n- Complete English translation of all sections\n- Removed all AI terminology, replaced with concrete benefits\n- Updated color scheme: Royal Blue (#1E3A8A) + Luxury Gold (#D4AF37)\n- Mobile-responsive navigation with proper backdrop\n- Inclusive messaging for premium hospitality (hotels, restaurants, clubs, casinos, venues)\n- Integrated Formspree contact form (mlgdjqvq)\n- VIP-focused copywriting with ROI emphasis\n\nSections updated:\n- Navigation: Mobile menu fixes, VIP branding\n- Hero: High-rollers, CEOs, Influencers focus\n- Problem: \"VIP Blind Spot\" messaging\n- How It Works: 4-step VIP detection process\n- Features: VIP Intelligence Suite\n- Pricing: VIP Starter/Professional/Enterprise tiers\n- Benefits: ROI-focused metrics\n- FAQ: Multi-vertical business types\n- Contact: Formspree integration\n- Footer: Know Your VIP branding\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git remote add:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(git push:*)",
+      "Bash(git init)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: Complete Know Your VIP landing page\n\n- Complete English VIP-focused landing page\n- Mobile-responsive navigation with backdrop fix\n- Formspree contact form integration (mlgdjqvq)\n- SEO optimization: sitemap.xml, robots.txt, metadata\n- Royal Blue (#1E3A8A) + Luxury Gold (#D4AF37) color scheme\n- Inclusive messaging for premium hospitality businesses\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(npm start)",
+      "Bash(npm install:*)",
+      "Bash(git commit:*)",
+      "Bash(git pull:*)",
+      "Bash(npm run dev:*)",
+      "Bash(pkill:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)"
+    ]
+  }
+}

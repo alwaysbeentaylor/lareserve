@@ -1,0 +1,103 @@
+=== RESERVERINGSRAPPORT ANALYSE ===
+
+Totaal rijen data: 212 (excl headers)
+
+=== ALLE KOLOMMEN ===
+1. Nummer
+2. Groepsnaam
+3. Achternaam
+4. Voornaam
+5. E-mail
+6. Telefoon
+7. Adres
+8. Nationaliteit van gast
+9. Verstuur marketing e-mails
+10. Boeker
+11. Status
+12. Maker
+13. Gecreëerd
+14. Vrijgave
+15. Bevestigd
+16. Geannuleerd
+17. Aankomst
+18. Vertrek
+19. Aantal (nachten)
+20. Aantal personen
+21. Aantal (bed, per nacht)
+22. Aangevraagde categorie
+23. Ruimtecategorie
+24. Ruimtenummer
+25. Oorsprong
+26. Channel Manager ID
+27. Groep channel manager ID
+28. Groep channel bevestigingsnummer
+29. Bevestigingsnummer reisbureau
+30. Segment
+31. Tarief
+32. Voucher
+33. Producten
+34. Bedrijf
+35. Reisbureau
+36. Gemiddeld tarief (per nacht)
+37. Totaal bedrag
+38. Geannuleerde kosten
+39. Commissie
+40. Kosten voor de gast
+41. Saldo's van medereizigers
+42. Type betaalkaart
+43. Betaalkaartnummer
+44. Vervaldatum
+45. Automatische betaling
+46. Rekeningen
+47. Reden voor annulering
+48. Opmerkingen
+49. Opmerkingen van gast
+50. Gastclassificaties
+51. Prijsclassificatie
+52. Doel van reservering
+53. Reserveringsbron
+54. Identificatienummer
+55. Bedrijf Identificatienummer
+56. Reisbureau Identificatienummer
+57. Details oorsprong resevering
+58. Reden voor herstellen
+
+=== VOORBEELD RESERVERING ===
+Nummer: 150944
+Groepsnaam: Weber-30-12-E739
+Achternaam: Weber
+Voornaam: Claudia
+E-mail: claudia@weber-home.com
+Telefoon: +491705417597
+Adres: Thüringer Straße 40, Engelskirchen, 51766
+Nationaliteit van gast: Duitsland
+Verstuur marketing e-mails: Nee
+Status: Bevestigd
+Maker: Ongespecificeerde gebruiker
+Gecreëerd: 45966.48808800926
+Bevestigd: 45966.48808800926
+Aankomst: 46021.625
+Vertrek: 46023.458333333336
+Aantal (nachten): 2
+Aantal personen: 2
+Aantal (bed, per nacht): 4
+Aangevraagde categorie: Casino View room 
+Ruimtecategorie: Casino View room 
+Ruimtenummer: 110
+Oorsprong: Boekingsmodule (Mews Booking Engine)
+Segment: 3 - Mews Website
+Tarief: Niet-restitueerbaar tarief 
+Producten: 4 x City Tax, 4 x Ontbijt, 2 x Parking
+Gemiddeld tarief (per nacht): 683.3
+Totaal bedrag: 1366.6
+Geannuleerde kosten: 0
+Commissie: 0
+Kosten voor de gast: 1366.6
+Type betaalkaart: Mastercard
+Betaalkaartnummer: ****0442
+Vervaldatum: 11/26
+Automatische betaling: Succes
+Opmerkingen: This reservation was Checked-in Online via Runnr
+Prijsclassificatie: Kortstondig
+Reserveringsbron: La Réserve Resort Booking Engine
+Identificatienummer: e14c578f-04b2-4d38-8d77-b38c00b0902b

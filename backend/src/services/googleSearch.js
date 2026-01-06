@@ -1,0 +1,883 @@
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
+const fetch = require('node-fetch');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
+/**
+ * Google Search service for guest research
+ * Uses Puppeteer with 2Captcha reCAPTCHA solving and proxy support
+ */
+
+class GoogleSearchService {
+    constructor() {
+        this.browser = null;
+        this.lastRequestTime = 0;
+        this.minDelay = parseInt(process.env.GOOGLE_SEARCH_DELAY || '2500'); // 2.5 seconds between searches
+        this.apiKey = process.env.TWO_CAPTCHA_API_KEY;
+        this.proxyUrl = process.env.PROXY_URL;
+        this.proxyAgent = this.proxyUrl ? new HttpsProxyAgent(this.proxyUrl) : null;
+        this.cookies = new Map();
+        this.userAgents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
+        ];
+        this.currentUserAgent = this.userAgents[0];
+        
+        // EU Region proxy - rotating IPs from European pool
+        this.proxyPool = [
+            'https://u1bda9df9575305d3-zone-custom-region-eu:u1bda9df9575305d3@101.32.255.125:2333'
+        ];
+        this.currentProxyIndex = 0;
+        this.failedProxies = new Set();
+        this.rotateProxyOnNextLaunch = false;
+        this.currentProxyInfo = null;
+    }
+    
+    /**
+     * Get next proxy from rotation pool
+     */
+    getNextProxy() {
+        if (this.proxyPool.length === 0) return null;
+        
+        // Try to find a proxy that hasn't failed recently
+        let attempts = 0;
+        while (attempts < this.proxyPool.length) {
+            const proxy = this.proxyPool[this.currentProxyIndex];
+            this.currentProxyIndex = (this.currentProxyIndex + 1) % this.proxyPool.length;
+            
+            // Skip if this proxy failed recently
+            if (!this.failedProxies.has(proxy)) {
+                return proxy;
+            }
+            attempts++;
+        }
+        
+        // All proxies failed, reset and try again
+        this.failedProxies.clear();
+        return this.proxyPool[0];
+    }
+    
+    /**
+     * Mark proxy as failed
+     */
+    markProxyFailed(proxy) {
+        if (!proxy) return;
+        this.failedProxies.add(proxy);
+        // Remove from failed list after 5 minutes
+        setTimeout(() => {
+            this.failedProxies.delete(proxy);
+        }, 5 * 60 * 1000);
+    }
+
+    /**
+     * Get the currently active proxy URL
+     */
+    getCurrentProxy() {
+        if (this.proxyPool.length === 0) return null;
+        // Return the proxy that was last assigned (index - 1, wrapping)
+        const idx = (this.currentProxyIndex - 1 + this.proxyPool.length) % this.proxyPool.length;
+        return this.proxyPool[idx];
+    }
+
+    getRandomUserAgent() {
+        if (!this.currentUserAgent) {
+            this.currentUserAgent = this.userAgents[Math.floor(Math.random() * this.userAgents.length)];
+        }
+        return this.currentUserAgent;
+    }
+
+    async delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async ensureDelay() {
+        const timeSinceLastRequest = Date.now() - this.lastRequestTime;
+        if (timeSinceLastRequest < this.minDelay) {
+            await this.delay(this.minDelay - timeSinceLastRequest);
+        }
+        this.lastRequestTime = Date.now();
+    }
+
+    async getBrowser(useProxy = true) {
+        if (this.rotateProxyOnNextLaunch && this.browser) {
+            await this.closeBrowser();
+            this.rotateProxyOnNextLaunch = false;
+        }
+        
+        if (!this.browser) {
+            const args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-web-security'
+            ];
+
+            // Use proxy rotation if enabled
+            if (useProxy) {
+                const proxyUrl = this.getNextProxy();
+                if (proxyUrl) {
+                    // Extract proxy parts for Puppeteer
+                    // Format: https://username:password@host:port
+                    // Username can contain colons, so we need to match from the end
+                    const urlMatch = proxyUrl.match(/^https?:\/\/(?:([^@]+)@)?([^:]+):(\d+)$/);
+                    if (urlMatch) {
+                        const [, auth, host, port] = urlMatch;
+                        let username = null;
+                        let password = null;
+                        
+                        if (auth) {
+                            // Split auth on last colon (password can't contain colons)
+                            const lastColonIndex = auth.lastIndexOf(':');
+                            if (lastColonIndex > 0) {
+                                username = auth.substring(0, lastColonIndex);
+                                password = auth.substring(lastColonIndex + 1);
+                            } else {
+                                username = auth;
+                            }
+                        }
+                        
+                        args.push(`--proxy-server=${host}:${port}`);
+                        // Store proxy auth for later use
+                        this.currentProxyAuth = username && password ? { username, password } : null;
+                        this.currentProxyInfo = { url: proxyUrl, host, port, username, password };
+                        console.log(`🌐 Using proxy: ${host}:${port}${username && password ? ' (authenticated)' : ''}`);
+                    }
+                } else if (this.proxyUrl) {
+                    // Fallback to single proxy from env
+                    const urlMatch = this.proxyUrl.match(/^https?:\/\/(?:([^@]+)@)?([^:]+):(\d+)$/);
+                    if (urlMatch) {
+                        const [, auth, host, port] = urlMatch;
+                        let username = null;
+                        let password = null;
+                        
+                        if (auth) {
+                            const lastColonIndex = auth.lastIndexOf(':');
+                            if (lastColonIndex > 0) {
+                                username = auth.substring(0, lastColonIndex);
+                                password = auth.substring(lastColonIndex + 1);
+                            } else {
+                                username = auth;
+                            }
+                        }
+                        
+                        args.push(`--proxy-server=${host}:${port}`);
+                        this.currentProxyAuth = username && password ? { username, password } : null;
+                        this.currentProxyInfo = { url: this.proxyUrl, host, port, username, password };
+                        console.log(`🌐 Using proxy: ${host}:${port}${username && password ? ' (authenticated)' : ''}`);
+                    }
+                }
+            }
+
+            // Check if running in serverless environment
+            const isServerless = process.env.AWS_LAMBDA_FUNCTION_VERSION || process.env.VERCEL;
+
+            if (isServerless) {
+                this.browser = await puppeteer.launch({
+                    args: chromium.args.concat(args),
+                    defaultViewport: chromium.defaultViewport,
+                    executablePath: await chromium.executablePath(),
+                    headless: chromium.headless
+                });
+            } else {
+                // Local environment - use regular puppeteer (not puppeteer-core)
+                const puppeteerRegular = require('puppeteer');
+                this.browser = await puppeteerRegular.launch({
+                    headless: 'new',
+                    args
+                });
+            }
+        }
+        return this.browser;
+    }
+
+    async closeBrowser() {
+        if (this.browser) {
+            try {
+                await this.browser.close();
+            } catch (e) {
+                // Ignore close errors
+            }
+            this.browser = null;
+            // Reset proxy auth when closing browser
+            this.currentProxyAuth = null;
+            this.currentProxyInfo = null;
+        }
+    }
+
+    /**
+     * Make HTTP request (for 2Captcha API)
+     * Don't use proxy for 2Captcha calls
+     */
+    async makeRequest(url, options = {}) {
+        const is2Captcha = url.includes('2captcha.com');
+        if (!is2Captcha && this.proxyAgent) {
+            options.agent = this.proxyAgent;
+        }
+        return fetch(url, options);
+    }
+
+    /**
+     * DEEP SEARCH: Scrape multiple Google pages for comprehensive results
+     * @param {string} query - Search query
+     * @param {number} totalResults - Total results to fetch (will paginate)
+     * @returns {Array} - Array of {link, title, snippet}
+     */
+    async deepSearch(query, totalResults = 100) {
+        console.log(`🔎 DEEP Google Search: "${query}" (target: ${totalResults} results)`);
+
+        const allResults = [];
+        const resultsPerPage = 10;
+        const maxPages = Math.min(Math.ceil(totalResults / resultsPerPage), 10); // Max 10 pages (100 results)
+
+        for (let page = 0; page < maxPages; page++) {
+            const start = page * resultsPerPage;
+            console.log(`📄 Fetching Google page ${page + 1}/${maxPages} (start=${start})...`);
+
+            const pageResults = await this.searchWithPagination(query, resultsPerPage, start);
+
+            if (pageResults.length === 0) {
+                console.log(`⚠️ No more results found at page ${page + 1}, stopping...`);
+                break;
+            }
+
+            allResults.push(...pageResults);
+
+            if (allResults.length >= totalResults) {
+                console.log(`✅ Reached target of ${totalResults} results`);
+                break;
+            }
+
+            // Longer delay between pages to avoid rate limiting
+            await this.delay(3000);
+        }
+
+        console.log(`📋 Deep search found ${allResults.length} total results for: ${query}`);
+        return allResults;
+    }
+
+    /**
+     * Search with pagination support
+     * @param {string} query - Search query
+     * @param {number} num - Results per page
+     * @param {number} start - Starting index (0, 10, 20, etc.)
+     */
+    async searchWithPagination(query, num = 10, start = 0) {
+        await this.ensureDelay();
+
+        try {
+            const browser = await this.getBrowser();
+            const page = await browser.newPage();
+
+            await page.setUserAgent(this.getRandomUserAgent());
+            await page.setViewport({ width: 1920, height: 1080 });
+
+            // Apply cookies
+            if (this.cookies.size > 0) {
+                const cookieArray = Array.from(this.cookies.entries()).map(([name, value]) => ({
+                    name,
+                    value,
+                    domain: '.google.com',
+                    path: '/'
+                }));
+                await page.setCookie(...cookieArray);
+            }
+
+            // Build URL with pagination
+            const encodedQuery = encodeURIComponent(query);
+            const searchUrl = `https://www.google.com/search?q=${encodedQuery}&hl=en&num=${num}&start=${start}`;
+
+            await page.goto(searchUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 45000
+            });
+
+            // Save cookies (only valid ones)
+            try {
+                const pageCookies = await page.cookies();
+                pageCookies.forEach(cookie => {
+                    if (cookie.name && cookie.value && typeof cookie.value === 'string') {
+                        this.cookies.set(cookie.name, cookie.value);
+                    }
+                });
+            } catch (e) { /* ignore */ }
+
+            // Handle consent (only needed on first page)
+            if (start === 0) {
+                try {
+                    await page.waitForSelector('button', { timeout: 3000 });
+                    const buttons = await page.$$('button');
+                    for (const button of buttons) {
+                        const text = await page.evaluate(el => el.textContent, button);
+                        if (text && (text.includes('Accept all') || text.includes('Alles accepteren') || text.includes('Ik ga akkoord') || text.includes('I agree'))) {
+                            await button.click();
+                            await this.delay(2000);
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    // No consent dialog
+                }
+            }
+
+            // Check for CAPTCHA
+            const hasCaptcha = await this.detectCaptcha(page);
+            if (hasCaptcha) {
+                console.log('🔒 Google reCAPTCHA detected during pagination!');
+                await page.close();
+                return []; // Stop pagination on CAPTCHA
+            }
+
+            // Wait for results
+            await page.waitForSelector('#search, #rso', { timeout: 10000 }).catch(() => {});
+
+            // Extract results
+            const results = await page.evaluate((num) => {
+                const items = [];
+                const resultElements = document.querySelectorAll('div.g, div[data-hveid] > div');
+
+                resultElements.forEach((el, index) => {
+                    if (items.length >= num) return;
+
+                    const titleEl = el.querySelector('h3');
+                    const linkEl = el.querySelector('a[href]');
+                    const snippetEl = el.querySelector('div[data-sncf], .VwiC3b, .yXK7lf');
+
+                    const title = titleEl?.textContent || '';
+                    const link = linkEl?.href || '';
+                    const snippet = snippetEl?.textContent || '';
+
+                    if (title && link && !link.includes('google.com/search')) {
+                        items.push({ title, link, snippet });
+                    }
+                });
+
+                return items;
+            }, num);
+
+            await page.close();
+
+            return results;
+
+        } catch (error) {
+            console.error(`Google pagination error (start=${start}):`, error.message);
+            return [];
+        }
+    }
+
+    /**
+     * Main search method compatible with smartSearch.js
+     * Returns array of { link, title, snippet }
+     */
+    async search(query, maxResults = 10, retryCount = 0) {
+        const MAX_RETRIES = 4;
+        await this.ensureDelay();
+
+        try {
+            const browser = await this.getBrowser(true);
+            const page = await browser.newPage();
+
+            // Authenticate proxy before any navigation
+            if (this.currentProxyAuth) {
+                try {
+                    await page.authenticate({
+                        username: this.currentProxyAuth.username,
+                        password: this.currentProxyAuth.password
+                    });
+                    if (retryCount === 0) {
+                        console.log(`🔐 Proxy authenticated: ${this.currentProxyAuth.username.substring(0, 20)}...`);
+                    }
+                    await this.delay(300);
+                } catch (authError) {
+                    console.error(`⚠️ Proxy authentication failed: ${authError.message}`);
+                }
+            }
+
+            if (retryCount > 0) {
+                this.currentUserAgent = this.userAgents[retryCount % this.userAgents.length];
+            }
+            await page.setUserAgent(this.getRandomUserAgent());
+            await page.setViewport({ width: 1920, height: 1080 });
+
+            // DISABLED: Cookie reuse was causing Protocol errors and instability
+            // Each search uses a fresh session which is more reliable
+            this.cookies.clear();
+
+            // Use Google.nl - often less strict on CAPTCHA than google.com
+            const googleDomain = 'www.google.nl';
+            // Skip homepage preload - go directly to search (faster)
+            // try {
+            //     await page.goto(`https://${googleDomain}`, {
+            //         waitUntil: 'domcontentloaded',
+            //         timeout: 15000
+            //     });
+            //     await this.delay(300);
+            // } catch (e) {
+            //     // Ignore - we'll load search page directly
+            // }
+
+            const encodedQuery = encodeURIComponent(query);
+            const searchUrl = `https://${googleDomain}/search?q=${encodedQuery}&hl=nl&num=${maxResults}`;
+
+            const handleConsent = async () => {
+                try {
+                    await page.waitForSelector('button', { timeout: 3000 });
+                    const buttons = await page.$$('button');
+                    for (const button of buttons) {
+                        const text = await page.evaluate(el => el.textContent, button);
+                        if (text && (text.includes('Accept all') || text.includes('Alles accepteren') || text.includes('Ik ga akkoord') || text.includes('I agree'))) {
+                            await button.click();
+                            await this.delay(1500);
+                            break;
+                        }
+                    }
+                } catch (e) {
+                    // No consent dialog
+                }
+            };
+
+            // DISABLED: Cookie saving - using fresh session per search is more reliable
+            const saveCookies = async () => {
+                // No-op: cookies disabled for stability
+            };
+
+            const loadSearchPage = async () => {
+                await page.goto(searchUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 30000  // Reduced timeout - fail faster
+                });
+                await handleConsent();
+            };
+
+            console.log(`🔍 Google Search: ${query}${retryCount > 0 ? ` (retry ${retryCount}/${MAX_RETRIES})` : ''}`);
+            await loadSearchPage();
+
+            let captchaDetected = await this.detectCaptcha(page);
+            if (captchaDetected) {
+                console.log(`🔒 Google reCAPTCHA detected! (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+                let solved = false;
+                if (this.apiKey) {
+                    solved = await this.solveCaptcha(page, searchUrl);
+                    if (solved) {
+                        console.log('✅ reCAPTCHA solved! Reloading results...');
+                        await this.delay(2000);
+                        await loadSearchPage();
+                        captchaDetected = await this.detectCaptcha(page);
+                        
+                        if (captchaDetected) {
+                            // CAPTCHA appeared AGAIN after solving - this proxy/session is flagged
+                            console.log('⚠️ CAPTCHA re-appeared after solving! Proxy is flagged - rotating...');
+                            await page.close();
+                            this.cookies.clear();
+                            this.markProxyFailed(this.getCurrentProxy());
+                            await this.closeBrowser();
+                            
+                            if (retryCount < MAX_RETRIES - 1) {
+                                console.log('🔄 Retrying with fresh proxy...');
+                                return this.search(query, maxResults, retryCount + 1);
+                            }
+                            return [];
+                        } else {
+                            // CAPTCHA solved successfully - rotate proxy for next query to prevent re-flagging
+                            console.log('✅ CAPTCHA solved successfully! Will rotate proxy for next search.');
+                            this.markProxyFailed(this.getCurrentProxy()); // Mark this one as used for CAPTCHA
+                        }
+                    } else {
+                        console.log('❌ reCAPTCHA solution failed.');
+                    }
+                } else {
+                    console.log('⚠️ 2Captcha API key missing - rotating proxy');
+                }
+
+                // If still have captcha (solve failed or no API key)
+                if (captchaDetected && !solved) {
+                    await page.close();
+                    this.cookies.clear();
+                    this.markProxyFailed(this.getCurrentProxy());
+                    await this.closeBrowser();
+                    if (retryCount < MAX_RETRIES - 1) {
+                        console.log('🔄 Rotating proxy and retrying...');
+                        return this.search(query, maxResults, retryCount + 1);
+                    }
+                    return [];
+                }
+            }
+
+            await page.waitForSelector('#search, #rso', { timeout: 10000 }).catch(() => {});
+
+            const results = await page.evaluate((maxResults) => {
+                const items = [];
+                const resultElements = document.querySelectorAll('div.g, div[data-hveid] > div');
+
+                resultElements.forEach((el) => {
+                    if (items.length >= maxResults) return;
+
+                    const titleEl = el.querySelector('h3');
+                    const linkEl = el.querySelector('a[href]');
+                    const snippetEl = el.querySelector('div[data-sncf], .VwiC3b, .yXK7lf');
+
+                    const title = titleEl?.textContent || '';
+                    const link = linkEl?.href || '';
+                    const snippet = snippetEl?.textContent || '';
+
+                    if (title && link && !link.includes('google.com/search')) {
+                        items.push({ title, link, snippet });
+                    }
+                });
+
+                return items;
+            }, maxResults);
+
+            await page.close();
+
+            console.log(`📋 Found ${results.length} Google results for: ${query}`);
+            return results;
+
+        } catch (error) {
+            console.error('Google search error:', error.message);
+            this.rotateProxyOnNextLaunch = true;
+            this.cookies.clear();
+            await this.closeBrowser();
+
+            if (retryCount < MAX_RETRIES - 1) {
+                return this.search(query, maxResults, retryCount + 1);
+            }
+
+            return [];
+        }
+    }
+
+    /**
+     * Detect if page has reCAPTCHA
+     */
+    async detectCaptcha(page) {
+        try {
+            // Check for reCAPTCHA iframe
+            const captchaFrame = await page.$('iframe[src*="recaptcha"]');
+            if (captchaFrame) return true;
+
+            // Check for "unusual traffic" message
+            const content = await page.content();
+            if (content.includes('unusual traffic') ||
+                content.includes('not a robot') ||
+                content.includes('CAPTCHA') ||
+                content.includes('g-recaptcha')) {
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Solve Google reCAPTCHA using 2Captcha
+     */
+    async solveCaptcha(page, pageUrl) {
+        try {
+            // Extract reCAPTCHA sitekey
+            const sitekey = await page.evaluate(() => {
+                // Try to find sitekey in iframe
+                const iframe = document.querySelector('iframe[src*="recaptcha"]');
+                if (iframe) {
+                    const match = iframe.src.match(/[?&]k=([^&]+)/);
+                    if (match) return match[1];
+                }
+
+                // Try to find in recaptcha div
+                const recaptchaDiv = document.querySelector('.g-recaptcha, [data-sitekey]');
+                if (recaptchaDiv) {
+                    return recaptchaDiv.getAttribute('data-sitekey');
+                }
+
+                return null;
+            });
+
+            if (!sitekey) {
+                console.log('⚠️ Could not extract reCAPTCHA sitekey');
+                return false;
+            }
+
+            console.log(`🔑 Extracted sitekey: ${sitekey.substring(0, 20)}...`);
+
+            // Create 2Captcha task
+            const createTaskUrl = 'https://api.2captcha.com/createTask';
+            const taskPayload = {
+                clientKey: this.apiKey,
+                task: {
+                    type: 'RecaptchaV2TaskProxyless',
+                    websiteURL: pageUrl,
+                    websiteKey: sitekey
+                }
+            };
+
+            const proxyInfo = this.currentProxyInfo;
+            if (proxyInfo && proxyInfo.host && proxyInfo.port) {
+                taskPayload.task.type = 'RecaptchaV2Task';
+                taskPayload.task.proxyType = 'http';
+                taskPayload.task.proxyAddress = proxyInfo.host;
+                taskPayload.task.proxyPort = parseInt(proxyInfo.port, 10);
+                if (proxyInfo.username && proxyInfo.password) {
+                    taskPayload.task.proxyLogin = proxyInfo.username;
+                    taskPayload.task.proxyPassword = proxyInfo.password;
+                }
+            }
+
+            console.log('🚀 Sending reCAPTCHA to 2Captcha...');
+            const createRes = await this.makeRequest(createTaskUrl, {
+                method: 'POST',
+                body: JSON.stringify(taskPayload),
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const createData = await createRes.json();
+
+            if (createData.errorId !== 0) {
+                console.error('2Captcha Error:', createData);
+                return false;
+            }
+
+            const taskId = createData.taskId;
+            console.log(`⏳ 2Captcha Task ID: ${taskId}. Waiting for solution...`);
+
+            // Poll for result
+            let solution = null;
+            let attempts = 0;
+            while (attempts < 40) { // Max 200 seconds
+                await this.delay(5000);
+                const resultUrl = 'https://api.2captcha.com/getTaskResult';
+                const resultRes = await this.makeRequest(resultUrl, {
+                    method: 'POST',
+                    body: JSON.stringify({ clientKey: this.apiKey, taskId }),
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const resultData = await resultRes.json();
+
+                if (resultData.status === 'ready') {
+                    solution = resultData.solution?.gRecaptchaResponse;
+                    break;
+                }
+                if (resultData.errorId !== 0) {
+                    console.error('2Captcha Result Error:', resultData);
+                    return false;
+                }
+                attempts++;
+            }
+
+            if (!solution) {
+                console.log('❌ 2Captcha timeout');
+                return false;
+            }
+
+            console.log('💡 reCAPTCHA solved! Token length:', solution.length);
+
+            // Inject solution token
+            await page.evaluate((token) => {
+                // Try multiple methods to inject the token
+                const responseField = document.getElementById('g-recaptcha-response');
+                if (responseField) {
+                    responseField.innerHTML = token;
+                    responseField.value = token;
+                }
+
+                // Try to find and call callback
+                if (typeof grecaptcha !== 'undefined') {
+                    const widgets = document.querySelectorAll('.g-recaptcha');
+                    widgets.forEach((widget, i) => {
+                        try {
+                            grecaptcha.getResponse(i);
+                        } catch (e) {}
+                    });
+                }
+
+                // Try to submit form
+                const form = document.querySelector('form');
+                if (form) {
+                    form.submit();
+                }
+            }, solution);
+
+            // Wait for navigation or reload
+            await this.delay(3000);
+
+            return true;
+
+        } catch (error) {
+            console.error('CAPTCHA solving error:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Legacy method for backward compatibility
+     * Maps old searchGuest() to new search() format
+     */
+    async searchGuest(guest) {
+        let searchQuery = `"${guest.full_name}"`;
+        if (guest.company) {
+            searchQuery += ` "${guest.company}"`;
+        }
+        if (guest.country) {
+            searchQuery += ` ${guest.country}`;
+        }
+
+        const results = await this.search(searchQuery, 10);
+
+        // Convert to old format
+        const linkedinResult = results.find(r => r.link && r.link.includes('linkedin.com/in/'));
+
+        return {
+            profilePhotoUrl: null,
+            jobTitle: linkedinResult ? this.extractJobTitle(linkedinResult) : null,
+            companyName: guest.company || null,
+            companySize: null,
+            industry: null,
+            linkedinUrl: linkedinResult?.link || null,
+            linkedinConnections: null,
+            websiteUrl: null,
+            notableInfo: results.slice(0, 3).map(r => r.snippet).join(' | '),
+            pressMentions: null,
+            rawResults: results
+        };
+    }
+
+    extractJobTitle(result) {
+        const titleText = result.title + ' ' + result.snippet;
+        const titleMatch = titleText.match(/[-–]\s*([^-–|]*(?:CEO|CTO|CFO|COO|Director|Manager|Founder|Owner|Partner|Head|VP|President|Chief)[^-–|]*)/i);
+        return titleMatch ? titleMatch[1].trim() : null;
+    }
+
+    /**
+     * Fetch page content from a URL using Puppeteer
+     * This allows us to visit pages and extract content
+     * @param {string} url - URL to visit
+     * @param {number} maxChars - Maximum characters to extract (default: 8000)
+     * @returns {string|null} - Page text content
+     */
+    async fetchPageContent(url, maxChars = 8000) {
+        if (!url) return null;
+
+        try {
+            console.log(`📄 Fetching page content: ${url.substring(0, 50)}...`);
+
+            const browser = await this.getBrowser();
+            const page = await browser.newPage();
+
+            // Set user agent
+            await page.setUserAgent(this.getRandomUserAgent());
+
+            // Navigate to URL
+            await page.goto(url, {
+                waitUntil: 'networkidle2',
+                timeout: 15000
+            });
+
+            // Wait a bit for dynamic content
+            await this.delay(2000);
+
+            // Extract text content from page
+            const content = await page.evaluate((maxChars) => {
+                // Remove scripts, styles, and hidden elements
+                const scripts = document.querySelectorAll('script, style, noscript, iframe');
+                scripts.forEach(el => el.remove());
+
+                // Get visible text content
+                const body = document.body;
+                if (!body) return '';
+
+                let text = body.innerText || body.textContent || '';
+
+                // Clean up whitespace
+                text = text
+                    .replace(/\s+/g, ' ')  // Multiple spaces to single space
+                    .replace(/\n+/g, '\n')  // Multiple newlines to single newline
+                    .trim();
+
+                // Limit length
+                if (text.length > maxChars) {
+                    text = text.substring(0, maxChars);
+                }
+
+                return text;
+            }, maxChars);
+
+            await page.close();
+
+            if (!content || content.length < 100) {
+                console.log('⚠️ Page content too short or empty');
+                return null;
+            }
+
+            console.log(`✅ Fetched ${content.length} characters from page`);
+            return content;
+
+        } catch (error) {
+            console.error(`❌ Error fetching page content: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Scrape LinkedIn profile headline from og:description meta tag
+     * @param {string} linkedinUrl - LinkedIn profile URL
+     * @returns {string|null} - LinkedIn headline/tagline
+     */
+    async scrapeLinkedInHeadline(linkedinUrl) {
+        if (!linkedinUrl || !linkedinUrl.includes('linkedin.com/in/')) {
+            return null;
+        }
+
+        try {
+            console.log(`🔗 Scraping LinkedIn headline: ${linkedinUrl}`);
+
+            const browser = await this.getBrowser();
+            const page = await browser.newPage();
+
+            // Set user agent
+            await page.setUserAgent(this.getRandomUserAgent());
+
+            // Navigate to LinkedIn profile
+            await page.goto(linkedinUrl, {
+                waitUntil: 'networkidle2',
+                timeout: 15000
+            });
+
+            // Extract og:description meta tag (contains headline)
+            const headline = await page.evaluate(() => {
+                const ogDesc = document.querySelector('meta[property="og:description"]');
+                if (!ogDesc) return null;
+
+                const content = ogDesc.getAttribute('content');
+                if (!content) return null;
+
+                // LinkedIn og:description format: "Name | Headline"
+                // or "Name - Headline"
+                const parts = content.split(/[|\-]/);
+                if (parts.length >= 2) {
+                    return parts.slice(1).join('-').trim();
+                }
+
+                return content;
+            });
+
+            await page.close();
+
+            if (headline && headline.length > 10) {
+                console.log(`💼 Found LinkedIn headline: "${headline}"`);
+                return headline;
+            }
+
+            console.log('⚠️ No LinkedIn headline found');
+            return null;
+
+        } catch (error) {
+            console.error(`❌ Error scraping LinkedIn: ${error.message}`);
+            return null;
+        }
+    }
+}
+
+module.exports = new GoogleSearchService();

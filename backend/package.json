@@ -1,0 +1,32 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "VIP Guest Research Tool - Backend API",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@sparticuz/chromium": "^143.0.0",
+    "better-sqlite3": "^12.5.0",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "https-proxy-agent": "^7.0.6",
+    "jimp": "^1.6.0",
+    "multer": "^2.0.2",
+    "node-fetch": "^2.7.0",
+    "openai": "^6.15.0",
+    "pdfkit": "^0.17.2",
+    "puppeteer": "^24.34.0",
+    "puppeteer-core": "^24.34.0",
+    "xlsx": "^0.18.5"
+  }
+}
