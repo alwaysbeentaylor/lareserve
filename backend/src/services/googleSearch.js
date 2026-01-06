@@ -172,10 +172,15 @@ class GoogleSearchService {
                 }
             }
 
-            // Check if running in serverless environment
-            const isServerless = process.env.AWS_LAMBDA_FUNCTION_VERSION || process.env.VERCEL;
+            // Check if running in serverless environment or Render (which also needs chromium)
+            // Render sets RENDER=true, or we can detect by checking if chromium executable exists
+            const isServerless = process.env.AWS_LAMBDA_FUNCTION_VERSION || 
+                                 process.env.VERCEL || 
+                                 process.env.RENDER === 'true' ||
+                                 process.env.RENDER_SERVICE_ID; // Render sets this automatically
 
             if (isServerless) {
+                console.log('🌐 Using @sparticuz/chromium for serverless environment');
                 this.browser = await puppeteer.launch({
                     args: chromium.args.concat(args),
                     defaultViewport: chromium.defaultViewport,
@@ -184,11 +189,22 @@ class GoogleSearchService {
                 });
             } else {
                 // Local environment - use regular puppeteer (not puppeteer-core)
-                const puppeteerRegular = require('puppeteer');
-                this.browser = await puppeteerRegular.launch({
-                    headless: 'new',
-                    args
-                });
+                try {
+                    const puppeteerRegular = require('puppeteer');
+                    this.browser = await puppeteerRegular.launch({
+                        headless: 'new',
+                        args
+                    });
+                } catch (error) {
+                    // Fallback to chromium if regular puppeteer fails
+                    console.log('⚠️ Regular puppeteer failed, falling back to chromium:', error.message);
+                    this.browser = await puppeteer.launch({
+                        args: chromium.args.concat(args),
+                        defaultViewport: chromium.defaultViewport,
+                        executablePath: await chromium.executablePath(),
+                        headless: chromium.headless
+                    });
+                }
             }
         }
         return this.browser;
